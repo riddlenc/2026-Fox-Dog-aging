@@ -1,0 +1,181 @@
+---
+title: "GRLS Incorporating Weight"
+author: "Abigail Fox"
+date: "2025-08-19"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE)
+```
+
+In this R Markdown Document, I will be incorporating weight data from the GRLS physical exam dataset into my analysis of RDW and longevity.
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(rcompanion)
+library(nlme)
+library(here)
+```
+
+Let's start by importing and cleaning the data the same way we have for the other analyses.
+
+```{r reading data}
+demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
+labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
+physical <- read.csv(here("GRLS_data/exam_physical.csv"))
+
+# We are only interested in RDW in the clinical labs (for now at least)
+labs_rdw <- subset(labs, test_name == "RDW")
+
+# Since we need to control for body size, we need to only use dogs with a weight listed
+physical_weight <- subset(physical, complete.cases(weight))
+
+# We're only interested in dogs for which demographic data, weight, and RDW are all available.
+demographic %<>% subset(subject_id %in% physical_weight$subject_id & subject_id %in% labs_rdw$subject_id)
+```
+
+```{r  cleaning demographic data}
+# Event type for censoring. TRUE = death, False = all other outcomes
+demographic$event_type <- demographic$death_date != ""
+
+# Reduce all event dates to a single column
+demographic <- unite(demographic, withdrawn_date, inactive_date, death_date, sep = "") %>% rename(event_date = withdrawn_date)
+
+# If no other event date, include date when data released.
+# This would represent the last follow-up, since the demographic data is released with no embargo.
+demographic$event_date %<>% sub(pattern = "^$", replacement = "2025-01")
+
+# Convert to year-month date type to allow for numeric operations
+demographic$birth_date %<>% as.yearmon()
+demographic$event_date %<>% as.yearmon()
+demographic[demographic$subject_id=="grlsR2FVJBB","event_date"] <- as.yearmon("2023-01") # fixing incorrect death date; see grls_init_expl
+
+# Determine age at event (in years)
+demographic$event_age <-demographic$event_date - demographic$birth_date
+
+# Clean up, keep only relevant variables
+demographic %<>% select(subject_id, sex_status, birth_date, event_date, event_age, event_type) %>%
+  na.omit()
+```
+
+```{r cleaning weight and RDW}
+# Remove all non-weight variables (and remove any incomplete entries)
+physical_weight %<>% select(subject_id, record_date, weight) %>%
+  rename(weight_date = record_date) %>%
+  subset(weight_date != "") %>%
+  na.omit()
+
+# Convert to year-month date type
+physical_weight$weight_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+physical_weight %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+physical_weight$weight_age <- physical_weight$weight_date - physical_weight$birth_date
+physical_weight$sex_status %<>% as.factor()
+
+# Remove all non-RDW variables (and remove any incomplete entries)
+labs_rdw %<>% select(subject_id, visit_date, test_value) %>%
+  rename(RDW_date = visit_date, RDW = test_value) %>%
+  subset(RDW_date != "")
+labs_rdw$RDW %<>% as.numeric()
+labs_rdw %<>% na.omit()
+
+# Convert to year-month date type
+labs_rdw$RDW_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+labs_rdw %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+labs_rdw$RDW_age <- labs_rdw$RDW_date - labs_rdw$birth_date
+labs_rdw$sex_status %<>% as.factor()
+```
+
+```{r RDW transform}
+labs_rdw$RDW_Blom <- blom(labs_rdw$RDW) # Normal scores transformation on RDW
+```
+
+It will also be helpful to define a dataset with Percentage of Life Lived.
+
+```{r Determining PLL}
+# Create a new dataframe with only labs for dogs that aren't censored
+labs_rdw_dead <- labs_rdw[labs_rdw$subject_id %in% demographic[which(demographic$event_type), "subject_id"],]
+
+# Merge with demographic to get age at death
+labs_rdw_dead %<>% merge(select(demographic, subject_id, event_age), by = "subject_id")
+
+# Divide age at RDW by age at death to determine percentage of life lived at RDW
+labs_rdw_dead$RDW_PLL <- labs_rdw_dead$RDW_age / labs_rdw_dead$event_age
+```
+
+Time points where weights are taken don't necessarily correspond to those where RDW is taken. Let's see how much they match up.
+
+```{r Weight matches}
+match_vec <- c()
+for(dog in unique(labs_rdw$subject_id)) {
+  match_vec %<>% c(
+    labs_rdw[labs_rdw$subject_id == dog, "RDW_date"] %in%
+        physical_weight[physical_weight$subject_id == dog, "weight_date"]
+    )
+}
+
+print("Number of RDW entries with a corresponding weight:")
+sum(match_vec, na.rm = TRUE)
+
+print("Number of RDW entries with no corresponding weight:")
+sum(!match_vec, na.rm = TRUE)
+``` 
+
+Not great. Let's see about performing a rolling join, so that previous weight measurements can carry forward into the next RDW measurement. Any more than one year starts to feel like the weight measurement will be unreliable, so that can be our cutoff.
+
+```{r Weight Join}
+rdw_weight_join <- inner_join( # Keep only rows with values in both tables
+  labs_rdw, select(physical_weight, -birth_date, -sex_status),
+  join_by(subject_id, closest(RDW_age >= weight_age)) # Rolling join, carry over last weight measurement
+  ) %>% 
+  subset(RDW_age - weight_age <= 1) # Pipe to subset and remove all weight measures >1 yr old
+
+rdw_PLL_weight_join <- inner_join( # Keep only rows with values in both tables
+  labs_rdw_dead, select(physical_weight, -birth_date, -sex_status),
+  join_by(subject_id, closest(RDW_age >= weight_age)) # Rolling join, carry over last weight measurement
+  ) %>% 
+  subset(RDW_age - weight_age <= 1) # Pipe to subset and remove all weight measures >1 yr old
+
+# Histogram to visualize the distribution of time between RDW and weight measures
+hist(rdw_weight_join$RDW_age - rdw_weight_join$weight_age)
+hist(rdw_PLL_weight_join$RDW_age - rdw_PLL_weight_join$weight_age)
+```
+
+```{r LMEs}
+age_sex_weight_lme <- lme(RDW_Blom ~ RDW_age + sex_status + weight, random = ~ 1|subject_id, data = rdw_weight_join)
+PLL_sex_weight_lme <- lme(RDW_Blom ~ RDW_PLL + sex_status + weight, random = ~ 1|subject_id, data = rdw_PLL_weight_join)
+
+summary(age_sex_weight_lme)
+summary(PLL_sex_weight_lme)
+```
+
+```{r Predicting PLL}
+RDW_sex_weight_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status + weight, random = ~ 1|subject_id, data = rdw_PLL_weight_join)
+summary(RDW_sex_weight_lme)
+
+RDW_weight_lme  <- lme(RDW_PLL ~ RDW_Blom + weight, random = ~ 1|subject_id, data = rdw_PLL_weight_join)
+summary(RDW_weight_lme)
+```
+
+Additions for plots/statistics from model
+
+```{r}
+library(performance)
+
+# Calculate Nakagawa's R^2 for our model
+model_performance(RDW_sex_weight_lme)
+
+model_performance(RDW_weight_lme)
+
+```

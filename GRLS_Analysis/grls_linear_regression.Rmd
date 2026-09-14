@@ -1,0 +1,204 @@
+---
+title: "GRLS Age/RDW Regressions"
+author: "Abigail Fox"
+date: "2025-06-27"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE)
+```
+
+In this R Markdown Document, I will be attempting to fit a linear model to the relationship between age and RDW in the Golden Retriever Lifetime Study data. If the data cannot be captured by a linear regression, I plan to fit a Generalized Additive Model, similar to the approach used by the Di Francesco et al preprint.
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(rcompanion)
+library(here)
+```
+
+```{r reading data}
+demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
+labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
+physical <- read.csv(here("GRLS_data/exam_physical.csv"))
+
+# We are only interested in RDW in the clinical labs (for now at least)
+labs_rdw <- subset(labs, test_name == "RDW")
+
+# Since we need to control for body size, we need to only use dogs with a weight listed
+physical_weight <- subset(physical, complete.cases(weight))
+
+# We're only interested in dogs for which demographic data, weight, and RDW are all available.
+demographic %<>% subset(subject_id %in% physical_weight$subject_id & subject_id %in% labs_rdw$subject_id)
+```
+
+```{r  cleaning demographic data}
+# Event type for censoring. TRUE = death, False = all other outcomes
+demographic$event_type <- demographic$death_date != ""
+
+# Reduce all event dates to a single column
+demographic <- unite(demographic, withdrawn_date, inactive_date, death_date, sep = "") %>% rename(event_date = withdrawn_date)
+
+# If no other event date, include date when data released.
+# This would represent the last follow-up, since the demographic data is released with no embargo.
+demographic$event_date %<>% sub(pattern = "^$", replacement = "2025-01")
+
+# Convert to year-month date type to allow for numeric operations
+demographic$birth_date %<>% as.yearmon()
+demographic$event_date %<>% as.yearmon()
+demographic[demographic$subject_id=="grlsR2FVJBB","event_date"] <- as.yearmon("2023-01") # fixing incorrect death date; see grls_init_expl
+
+# Determine age at event (in years)
+demographic$event_age <-demographic$event_date - demographic$birth_date
+
+# Clean up, keep only relevant variables
+demographic %<>% select(subject_id, sex_status, birth_date, event_date, event_age, event_type) %>%
+  na.omit()
+```
+
+```{r cleaning weight and RDW}
+# Remove all non-weight variables (and remove any incomplete entries)
+physical_weight %<>% select(subject_id, record_date, weight) %>%
+  rename(weight_date = record_date) %>%
+  subset(weight_date != "") %>%
+  na.omit()
+
+# Convert to year-month date type
+physical_weight$weight_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+physical_weight %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+physical_weight$weight_age <- physical_weight$weight_date - physical_weight$birth_date
+physical_weight$sex_status %<>% as.factor()
+
+# Remove all non-RDW variables (and remove any incomplete entries)
+labs_rdw %<>% select(subject_id, visit_date, test_value) %>%
+  rename(RDW_date = visit_date, RDW = test_value) %>%
+  subset(RDW_date != "")
+labs_rdw$RDW %<>% as.numeric()
+labs_rdw %<>% na.omit()
+
+# Convert to year-month date type
+labs_rdw$RDW_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+labs_rdw %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+labs_rdw$RDW_age <- labs_rdw$RDW_date - labs_rdw$birth_date
+labs_rdw$sex_status %<>% as.factor()
+```
+
+Now that we have all the data imported and cleaned, we know from previous exploration that we need to normal scores transform RDW. Age is close enough to normally distributed that we need not worry about transforming it.
+
+```{r RDW transform}
+labs_rdw$RDW_Blom <- blom(labs_rdw$RDW) # Normal scores transformation on RDW
+
+print("RDW (Normal Scores Transformed) mean, median, range:")
+mean(labs_rdw$RDW_Blom)
+median(labs_rdw$RDW_Blom)
+range(labs_rdw$RDW_Blom)
+hist(labs_rdw$RDW_Blom)
+qqnorm(labs_rdw$RDW_Blom)
+qqline(labs_rdw$RDW_Blom)
+```
+
+```{r Multiple Regression 1 (RDW on Age and Sex)}
+age_sex_lm <- lm(RDW_Blom ~ RDW_age + sex_status, data = labs_rdw)
+plot(age_sex_lm, ask = FALSE)
+plot(RDW_Blom ~ RDW_age, data = labs_rdw)
+abline(age_sex_lm)
+summary(age_sex_lm)
+```
+
+As expected, the model is significant, as is age, but sex/status is not and the R squared value is very small. This reflects the small effect size of the correlation and the insignificant results of most of the Tukey tests after the sex/status ANOVA (both performed in grls_init_expl). It may be also be worth looking at these variables as a predictor of percentage of life lived.
+
+Let's subset to only dogs with a death date listed and determine PLL.
+
+```{r Determining PLL}
+# Create a new dataframe with only labs for dogs that aren't censored
+labs_rdw_dead <- labs_rdw[labs_rdw$subject_id %in% demographic[which(demographic$event_type), "subject_id"],]
+
+# Merge with demographic to get age at death
+labs_rdw_dead %<>% merge(select(demographic, subject_id, event_age), by = "subject_id")
+
+# Divide age at RDW by age at death to determine percentage of life lived at RDW
+labs_rdw_dead$RDW_PLL <- labs_rdw_dead$RDW_age / labs_rdw_dead$event_age
+
+print("PLL at RDW labs mean, median, range:")
+mean(labs_rdw_dead$RDW_PLL)
+median(labs_rdw_dead$RDW_PLL)
+range(labs_rdw_dead$RDW_PLL)
+hist(labs_rdw_dead$RDW_PLL)
+qqnorm(labs_rdw_dead$RDW_PLL)
+qqline(labs_rdw_dead$RDW_PLL)
+```
+
+Ok, let's do a regression on PLL and sex.
+
+```{r Multiple Regression 2 (RDW on PLL and Sex)}
+PLL_sex_lm <- lm(RDW_Blom ~ RDW_PLL + sex_status, data = labs_rdw_dead)
+plot(PLL_sex_lm, ask = FALSE)
+plot(RDW_Blom ~ RDW_PLL, data = labs_rdw_dead)
+abline(PLL_sex_lm)
+summary(PLL_sex_lm)
+```
+
+After discussing the CR paper's use of GAMMs with Eric, I've realized why a mixed model is necessary. Because there are multiple measurements per individual, these measurements are not independent and will cluster. This can be compensated for by treating subject_id as a random effect. We'll be doing this with a random intercept, as was done in the CR paper.
+
+```{r Initial LME}
+library(nlme)
+
+age_sex_lme <- lme(RDW_Blom ~ RDW_age + sex_status, random = ~ 1|subject_id, data = labs_rdw)
+summary(age_sex_lme)
+
+PLL_sex_lme  <- lme(RDW_Blom ~ RDW_PLL + sex_status, random = ~ 1|subject_id, data = labs_rdw_dead)
+summary(PLL_sex_lme)
+```
+
+Because we're interested in using RDW as a diagnostic tool, it would be helpful to be able to predict PLL from RDW. Let's try running a similar regression with PLL as the response.
+
+```{r Predict PLL}
+RDW_sex_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status, random = ~ 1|subject_id, data = labs_rdw_dead)
+summary(RDW_sex_lme)
+```
+
+It was suggested that I try fitting a model to only the later part of the data (or a two-part model), based on our exploratory plots. This may also be an application for an additive model.  Let's start with just fitting two different models.
+
+```{r Late Life Model}
+# Let's fit a model for later life, when RDW seems to be on the increase. First we need to define when "late-life" starts.
+
+quantile(labs_rdw_dead$RDW)
+
+mean(subset(labs_rdw_dead, RDW_PLL < 0.7)$RDW)
+mean(subset(labs_rdw_dead, RDW_PLL < 0.8 & RDW_PLL > 0.7)$RDW)
+mean(subset(labs_rdw_dead, RDW_PLL < 0.9 & RDW_PLL > 0.8)$RDW)
+mean(subset(labs_rdw_dead, RDW_PLL > 0.9)$RDW)
+
+mean(subset(labs_rdw_dead, RDW_PLL < 0.95 & RDW_PLL > 0.9)$RDW)
+
+
+# Looking at the quantiles, it seems like the "high RDW" range can be pretty safely placed somewhere > 13. The jump in mean RDW from <13 to >13 occurs somewhere in the last 10% (or indeed last 5%) of life - this can be seen on the smooth plot as a strong curve upward around 0.9 PLL.
+
+labs_latelife <- subset(labs_rdw_dead, RDW_PLL > 0.9)
+
+latelife_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status, random = ~ 1|subject_id, data = labs_latelife)
+summary(latelife_lme)
+
+```
+
+Additions for plots/statistics from model
+
+```{r}
+library(performance)
+
+# Calculate Nakagawa's R^2 for our model
+model_performance(RDW_sex_lme)
+
+```
+
