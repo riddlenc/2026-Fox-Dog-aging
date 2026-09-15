@@ -1,0 +1,190 @@
+---
+title: "GRLS LASSO"
+author: "Abigail Fox"
+date: "2026-09-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(rcompanion)
+library(here)
+library(glmnet)
+library(lubridate)
+```
+
+```{r reading data}
+demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
+labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
+physical <- read.csv(here("GRLS_data/exam_physical.csv"))
+
+# We want to use CBC blood metrics
+labs_cbc <- subset(labs, test_group == "Complete Blood Count" & vet_visit_type == "annual") %>% unique()
+
+# Since we need to control for body size, we need to only use dogs with a weight listed
+physical_weight <- subset(physical, complete.cases(weight))
+
+# We're only interested in dogs for which demographic data, weight, and cbc are all available.
+demographic %<>% subset(subject_id %in% physical_weight$subject_id & subject_id %in% labs_cbc$subject_id)
+
+nrow(demographic)
+```
+
+```{r  cleaning demographic data}
+# Event type for censoring. TRUE = death, False = all other outcomes
+demographic$event_type <- demographic$death_date != ""
+
+# Reduce all event dates to a single column
+demographic <- unite(demographic, withdrawn_date, inactive_date, death_date, sep = "") %>% rename(event_date = withdrawn_date)
+
+# If no other event date, include date when data released.
+# This would represent the last follow-up, since the demographic data is released with no embargo.
+demographic$event_date %<>% sub(pattern = "^$", replacement = "2025-01")
+
+# Convert to year-month date type to allow for numeric operations
+demographic$birth_date %<>% as.yearmon()
+demographic$event_date %<>% as.yearmon()
+demographic[demographic$subject_id=="grlsR2FVJBB","event_date"] <- as.yearmon("2023-01") # fixing incorrect death date; see grls_init_expl
+
+# Determine age at event (in years)
+demographic$event_age <-demographic$event_date - demographic$birth_date
+
+# Clean up, keep only relevant variables
+demographic %<>% select(subject_id, sex_status, birth_date, event_date, event_age, event_type) %>%
+  na.omit()
+```
+
+```{r cleaning weight and labs metadata}
+# Remove all non-weight variables (and remove any incomplete entries)
+physical_weight %<>% select(subject_id, record_date, weight) %>%
+  rename(weight_date = record_date) %>%
+  subset(weight_date != "") %>%
+  na.omit()
+
+# Convert to year-month date type
+physical_weight$weight_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+physical_weight %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+physical_weight$weight_age <- physical_weight$weight_date - physical_weight$birth_date
+physical_weight$sex_status %<>% as.factor()
+
+# Convert lab dates to year-month date type
+labs_cbc$visit_date <- parse_date_time(labs_cbc$visit_date, orders = c("ym", "mdy"))
+labs_cbc$visit_date %<>% as.yearmon()
+
+# Include only subjects who are not censored (i.e. death date is known)
+labs_cbc <- labs_cbc[labs_cbc$subject_id %in% demographic[which(demographic$event_type), "subject_id"],]
+
+# Merge with demographic to determine age (in years) at record date
+labs_cbc %<>% merge(select(demographic, subject_id, birth_date, event_age, sex_status), by = "subject_id")
+labs_cbc$visit_age <- labs_cbc$visit_date - labs_cbc$birth_date
+labs_cbc$sex_status %<>% as.factor()
+
+# Divide age at record date by age at death to determine percentage of life lived at record
+labs_cbc$visit_pll <- labs_cbc$visit_age / labs_cbc$event_age
+```
+
+```{r Weight Join}
+labs_cbc <- inner_join( # Keep only rows with values in both tables
+  labs_cbc, select(physical_weight, -birth_date, -sex_status),
+  join_by(subject_id, closest(visit_age >= weight_age)) # Rolling join, carry over last weight measurement
+  ) %>% 
+  subset(visit_age - weight_age <= 1) # Pipe to subset and remove all weight measures >1 yr old
+
+# Histogram to visualize the distribution of time between RDW and weight measures
+hist(labs_cbc$visit_age - labs_cbc$weight_age)
+```
+
+```{r Cleaning CBC data}
+labs_cbc$test_name_units <- paste(labs_cbc$test_name, labs_cbc$test_units)
+unique(labs_cbc$test_name_units)
+
+table(labs_cbc$test_name, labs_cbc$test_units) # Check how many of ea. test, verify tests always in one unit
+
+metrics_to_use <- c(
+  "% Eosinophils %",
+  "% Lymphocytes %",
+  "% Monocytes %",
+  "% Neutrophils %",
+  "Hematocrit (HCT) %",
+  "Hemoglobin (HGB) g/dL",
+  "MPV fL",
+  "RBC M/uL",
+  "RDW %",
+  "WBC K/uL"
+) # Other metrics are either based on an already included metric, have no units, or are included in too few records
+
+labs_cbc %<>% filter(test_name_units %in% metrics_to_use)
+
+labs_cbc %<>% select(-test_name, -test_units, -ref_range_or_cutoff)
+
+labs_cbc_pivot <- pivot_wider(labs_cbc, names_from = test_name_units, values_from = test_value) %>% unnest(cols = metrics_to_use) %>% na.omit()
+
+labs_cbc_pivot[,metrics_to_use] <- sapply(labs_cbc_pivot[,metrics_to_use], as.numeric) # Convert all metrics to numeric
+labs_cbc_pivot[,metrics_to_use] <- sapply(labs_cbc_pivot[,metrics_to_use], blom) # Normal scores transform data before fitting
+labs_cbc_pivot$weight %<>% blom()
+```
+
+
+```{r}
+set.seed(31415)
+validation_subjects <- sample(unique(labs_cbc_pivot$subject_id), 0.3 * length(unique(labs_cbc_pivot$subject_id)))
+validation_samples <- labs_cbc_pivot[labs_cbc_pivot$subject_id %in% validation_subjects,]
+validation_x_df <- validation_samples %>% select(sex_status, weight, metrics_to_use)
+
+fitting_subjects <- unique(labs_cbc_pivot[! labs_cbc_pivot$subject_id %in% validation_samples,]$subject_id)
+fitting_samples <- labs_cbc_pivot[labs_cbc_pivot$subject_id %in% fitting_subjects,]
+fitting_x_df <- fitting_samples %>% select(sex_status, weight, metrics_to_use)
+```
+
+```{r}
+x_matrix <- makeX(
+  train = fitting_x_df,
+  test = validation_x_df,
+  na.impute = TRUE
+)
+
+cv <- cv.glmnet(
+  x = x_matrix$x,
+  y = fitting_samples$visit_pll,
+  alpha = 1,
+  nfolds = 10
+)
+
+plot(cv)
+
+glm <- glmnet(
+  x = x_matrix$x,
+  y = fitting_samples$visit_pll,
+  alpha = 1,
+  lambda = cv$lambda.min
+)
+
+assess_glm <- assess.glmnet(
+  glm,
+  newx = x_matrix$xtest,
+  newy = validation_samples$visit_pll
+)
+
+```
+
+```{r}
+library(ggplot2)
+predict_test <- predict(glm, s = cv$lambda.min, newx = x_matrix$xtest)
+colnames(predict_test) <- "predicted_PLL"
+cor.test(validation_samples$visit_pll, predict_test)
+
+plot_predict <- cbind(validation_samples, predict_test)
+ggplot(plot_predict, aes(x = visit_pll, y = predicted_PLL)) + geom_point()
+```
+
