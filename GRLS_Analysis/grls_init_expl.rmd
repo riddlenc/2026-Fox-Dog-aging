@@ -1,0 +1,810 @@
+---
+title: "GRLS Initial exploration"
+author: "Abigail Fox"
+date: "2025-05-05"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE)
+```
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(rcompanion)
+```
+
+
+
+# Cleaning the environment
+```{r}
+rm(list=ls()) # cleaning the environment first
+```
+
+## 5/5:
+
+Let's just do some initial exploration of the Golden Retriever Lifetime Study data. Let's start by seeing how many dogs have complete data for our purposes.
+
+```{r reading data}
+demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
+labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
+physical <- read.csv(here("GRLS_data/exam_physical.csv"))
+
+# We are only interested in RDW in the clinical labs (for now at least)
+labs_rdw <- subset(labs, test_name == "RDW")
+
+# Since we need to control for body size, we need to only use dogs with a weight listed
+physical_weight <- subset(physical, complete.cases(weight))
+
+# We're only interested in dogs for which demographic data, weight, and RDW are all available.
+demographic %<>% subset(subject_id %in% physical_weight$subject_id & subject_id %in% labs_rdw$subject_id)
+
+nrow(demographic)
+```
+
+1923 dogs have entries for both weight and RDW.
+
+Fortunately, it looks like all dogs have a birth-date and sex listed. We're interested in looking at survival/mortality in this data, so we want to be able to perform time-to-event survival analysis. It looks like there are 5 possible outcomes for dogs in the dataset:
+
+1.  The dog was still alive and actively enrolled in the study at the time the data was released, and thus has no date listed for death, withdrawal, or inactivity.
+2.  The dog was withdrawn, in which case a withdrawn_date is listed.
+3.  The dog was no longer actively enrolled, in which case an inactive_date is listed. (How is this different from case 2?)
+4.  The dog was euthanized in which case a death_date is listed and is_euthanized is 1.
+5.  The dog dies (not from euthanasia) in which case a death_date is listed and is_euthanized is 0.
+
+Cases 1 to 3 are effectively right-censors, and the date is either the date listed for that dog's outcome or the last date for which data was released (in the case of dogs still alive). Case 4 should also probably be right-censored, but I should double-check how this is dealt with in other data from pets. It may be that mortality generally, not simply non-euthanasia mortality, is the event we're interested in. If that's the case, both types of death are coded the same.
+
+\newpage
+
+## 5/7:
+
+After talking with Dr. Riddle, I've decided to look at the cause of death data.
+
+```{r endpoints}
+endpoints <- read.csv("study_endpoints.csv")
+endpoints %<>% subset(subject_id %in% demographic$subject_id)
+
+nrow(endpoints)
+```
+
+It looks like there's only 361 dogs that match our other conditions with a cause of death listed in the "Malignancy and Cause of Death" dataset. This isn't even discounting all of the dogs where cause of death is trauma or unknown. We may just have to consider all deaths, regardless of cause.
+
+\newpage
+
+## 5/8:
+
+Let's try this approach just for exploration. We'll look at all sources of mortality equally (including euthanasia) since it doesn't seem easy to find which dogs died or were euthanized because of injuries versus those dying from illness.
+
+Let's get the data in a more workable form.
+
+```{r  cleaning demographic data}
+# Event type for censoring. TRUE = death, False = all other outcomes
+demographic$event_type <- demographic$death_date != ""
+
+# Reduce all event dates to a single column
+demographic <- unite(demographic, withdrawn_date, inactive_date, death_date, sep = "") %>% rename(event_date = withdrawn_date)
+
+# If no other event date, include date when data released.
+# This would represent the last follow-up, since the demographic data is released with no embargo.
+demographic$event_date %<>% sub(pattern = "^$", replacement = "2025-01")
+
+# Convert to year-month date type to allow for numeric operations
+demographic$birth_date %<>% as.yearmon()
+demographic$event_date %<>% as.yearmon()
+
+# Determine age at event (in years)
+demographic$event_age <-demographic$event_date - demographic$birth_date
+
+# Clean up, keep only relevant variables
+demographic %<>% select(subject_id, sex_status, birth_date, event_date, event_age, event_type) %>%
+  na.omit()
+```
+
+```{r cleaning weight and RDW}
+# Remove all non-weight variables (and remove any incomplete entries)
+physical_weight %<>% select(subject_id, record_date, weight) %>%
+  rename(weight_date = record_date) %>%
+  subset(weight_date != "") %>%
+  na.omit()
+
+# Convert to year-month date type
+physical_weight$weight_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+physical_weight %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+physical_weight$weight_age <- physical_weight$weight_date - physical_weight$birth_date
+physical_weight$sex_status %<>% as.factor()
+
+# Remove all non-RDW variables (and remove any incomplete entries)
+labs_rdw %<>% select(subject_id, visit_date, test_value) %>%
+  rename(RDW_date = visit_date, RDW = test_value) %>%
+  subset(RDW_date != "")
+labs_rdw$RDW %<>% as.numeric()
+labs_rdw %<>% na.omit()
+
+# Convert to year-month date type
+labs_rdw$RDW_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+labs_rdw %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+labs_rdw$RDW_age <- labs_rdw$RDW_date - labs_rdw$birth_date
+labs_rdw$sex_status %<>% as.factor()
+```
+
+Now let's do some basic summary stats and visualizations.
+
+```{r basic summary}
+print("RDW mean, median, range:")
+mean(labs_rdw$RDW)
+median(labs_rdw$RDW)
+range(labs_rdw$RDW)
+
+print("RDW_age mean, median, range:")
+mean(labs_rdw$RDW_age)
+median(labs_rdw$RDW_age)
+range(labs_rdw$RDW_age)
+
+print ("Weight mean, median, range:")
+mean(physical_weight$weight)
+median(physical_weight$weight)
+range(physical_weight$weight)
+```
+
+Hmm. I can believe that some dogs had RDW higher than 30 (that's very severe anisocytosis though!) but I somehow don't believe that there was a nearly 800 pound dog enrolled in the study. Let's remove that and try again.
+
+```{r subset summary}
+physical_weight <- physical_weight[physical_weight$weight < 200,]
+
+print("RDW mean, median, range:")
+mean(labs_rdw$RDW)
+median(labs_rdw$RDW)
+range(labs_rdw$RDW)
+hist(labs_rdw$RDW, breaks = 17)
+qqnorm(labs_rdw$RDW)
+
+print("RDW_age mean, median, range:")
+mean(labs_rdw$RDW_age)
+median(labs_rdw$RDW_age)
+range(labs_rdw$RDW_age)
+hist(labs_rdw$RDW_age, xlim = range(5,13))
+qqnorm(labs_rdw$RDW_age)
+
+print ("Weight mean, median, range:")
+mean(physical_weight$weight)
+median(physical_weight$weight)
+range(physical_weight$weight)
+hist(physical_weight$weight)
+qqnorm(physical_weight$weight)
+```
+Looking at the age distribution, it's odd that the animals with RDW are all 6.5 years or older. I will look into that some more. 
+
+```{r}
+range(labs_rdw$RDW_date) 
+# All RDW values are from Nov 2020 onwards.
+
+range(labs$visit_date) # Doesn't work due to some formatting issues with the visit date column.
+
+cbc <- subset(labs, test_group == "Complete Blood Count") # Only the visits with CBC
+
+cbc <- subset(cbc, visit_date != "") # Removing the ones that don't have a date.
+
+range(cbc$visit_date) # Still doesn't work due to some formatting issues with the visit_date column.
+
+# We have some dates (4315 in fact) in this format, 9/18/2012, but we need 2012-09
+wrong_dates <- cbc %>% filter(grepl("^\\d{1,2}/\\d{2}/\\d{4}$", visit_date))
+
+# There are > 4000 of these, so we'll use regular expressions to substitute them:
+cbc$visit_date <- sub(
+  "^(\\d{1,2})/\\d{1,2}/(\\d{4})$",
+  "\\1-\\2",
+  cbc$visit_date
+  )
+
+#Sanity check
+range(cbc$visit_date)
+
+# Not quite there. We now have a date that's from 1932, which is in the original data file and needs to be removed.
+cbc <- subset(cbc, visit_date != "01-1932")
+range(cbc$visit_date)
+
+# We still have some dates that are m-yyyy instead of mm-yyyy. Fixing that.
+cbc$visit_date <- gsub("^([1-9])-(\\d{4})$", "0\\1-\\2", cbc$visit_date)
+
+# And finally, we can format this as date!
+cbc$visit_date <- as.yearmon(cbc$visit_date)
+
+# Make a visit_ID column
+cbc <- cbc %>% mutate(visit_ID = paste0(subject_id, "_", visit_date))
+
+cbc1 <- subset (cbc, visit_date >= "Nov 2020") # grabbing the data from 11-2020 onwards
+rdw_dates <- cbc1 %>% subset(test_name == "RDW")
+
+# Filtering visits that have RDW out from all visits after 11-2020
+no_RDW <- anti_join(cbc1, rdw_dates, by = join_by(visit_ID))
+length(unique(no_RDW$visit_ID)) #304
+length(unique(cbc1$visit_ID)) #3876
+
+```
+Ok, so there are 304 visits after Nov 2020, where dogs got CBCs done, but no RDW was recorded. So, this was not a clean switch in CBC collection protocols, but adopted by some, not all vets involved in GRLS. 
+
+Back to the regular analysis. 
+
+Neither RDW or weight are particularly normally distributed. RDW is very heavily quantized, so a rank transformation or similar will probably be necessary.
+
+How about a simple scatter plot?
+```{r}
+sc_plot <- ggplot(labs_rdw, aes(x=RDW_age, y=RDW)) +
+  geom_point() +
+  geom_smooth(method=lm , color="red", se=FALSE)
+sc_plot
+```
+This scatter plot looks pretty bad due to the "binned" data. 
+
+Trying a bubble chart instead.
+```{r}
+bubble_data <- labs_rdw %>% filter(!is.na(RDW)) %>% count(RDW_age, RDW)
+summary(bubble_data)
+
+# Basic bubble plot
+ggplot(bubble_data, aes(x=as.factor(RDW_age), y=RDW, size = n)) +
+    geom_point(alpha=0.7, position = position_dodge(width = 0.5)) +
+    scale_size_area(max_size = 15) 
+# Too many age categories. I'll need to bin them into 6 month bins. 
+
+bubble_data <- labs_rdw %>% filter(!is.na(RDW))
+bubble_data$RDW_age <- plyr::round_any(bubble_data$RDW_age, 0.5)
+
+bubble_data <- bubble_data %>% filter(!is.na(RDW)) %>% count(RDW_age, RDW)
+summary(bubble_data)
+
+ggplot(bubble_data, aes(x=as.factor(RDW_age), y=RDW, size = n)) +
+    geom_point(alpha=0.7, position = position_dodge(width = 0.5)) +
+    scale_size_area(max_size = 15) 
+# This one is reasonable.
+
+bubble_data %>% group_by(RDW_age) %>% summarize (v = sd(RDW)) #checking the SD of RDW for each age class.
+```
+
+
+How about a simple survival curve?
+
+```{r survival curve}
+ggsurvplot(survfit(Surv(event_age, event_type) ~ sex_status, data = demographic))
+
+surv_pvalue(survfit(Surv(event_age, event_type) ~ sex_status, data = demographic))
+
+survdiff(Surv(event_age, event_type) ~ sex_status, data = demographic)
+
+surv_summary(surv_fit(Surv(event_age, event_type) ~ sex_status, data = demographic))
+
+summary(as.factor(demographic$sex_status)) # Number of animals per group
+```
+
+After thinking about this survival curve some more, we realized that it is rather misleading - we have no deaths before 6 years of age, because our dataset doesn't include any of the animals that might have died prior to 11/202 at younger ages - they had no RDW data. Thus, to really understand what's going on, we need to get a survivorship curve based on all the animals. 
+```{r}
+demographic_all <- read.csv("dog_profile.csv") #Reading in all the data again.
+
+# Summary of status
+summary(as.factor(demographic_all$study_status))
+
+# Event type for censoring. TRUE = death, False = all other outcomes
+demographic_all$event_type <- demographic_all$death_date != ""
+
+# Reduce all event dates to a single column
+demographic_all <- unite(demographic_all, withdrawn_date, inactive_date, death_date, sep = "") %>% rename(event_date = withdrawn_date)
+
+# If no other event date, include date when data released.
+# This would represent the last follow-up, since the demographic data is released with no embargo.
+demographic_all$event_date %<>% sub(pattern = "^$", replacement = "2025-01")
+
+# Convert to year-month date type to allow for numeric operations
+demographic_all$birth_date %<>% as.yearmon()
+demographic_all$event_date %<>% as.yearmon()
+
+# Determine age at event (in years)
+demographic_all$event_age <-demographic_all$event_date - demographic_all$birth_date
+
+# Clean up, keep only relevant variables
+demographic_all %<>% select(subject_id, sex_status, birth_date, event_date, event_age, event_type) %>%
+  na.omit()
+
+print("Event_age, mean, median, range:")
+mean(demographic_all$event_age)
+median(demographic_all$event_age)
+range(demographic_all$event_age)
+hist(demographic_all$event_age, breaks = 17)
+qqnorm(demographic_all$event_age)
+
+# Survival plots etc.
+ggsurvplot(survfit(Surv(event_age, event_type) ~ sex_status, data = demographic_all))
+
+surv_pvalue(survfit(Surv(event_age, event_type) ~ sex_status, data = demographic_all))
+
+survdiff(Surv(event_age, event_type) ~ sex_status, data = demographic_all)
+
+surv_summary(surv_fit(Surv(event_age, event_type) ~ sex_status, data = demographic_all))
+
+#Again without sex_status
+ggsurvplot(survfit(Surv(event_age, event_type) ~ 1, data = demographic_all))
+
+surv_summary(surv_fit(Surv(event_age, event_type) ~ 1, data = demographic_all))
+
+summary(as.factor(demographic_all$sex_status)) # Number of animals per group
+```
+
+
+
+\newpage
+
+## 5/13:
+
+Alright, after consulting with Dr. Riddle I have decided to ignore weight and PLL for now and just see what we can get from RDW, age, and sex. First, let's try and normalize RDW.
+
+```{r RDW transform}
+labs_rdw$RDW_Blom <- blom(labs_rdw$RDW) # Normal scores transformation on RDW
+
+print("RDW (Normal Scores Transformed) mean, median, range:")
+mean(labs_rdw$RDW_Blom)
+median(labs_rdw$RDW_Blom)
+range(labs_rdw$RDW_Blom)
+hist(labs_rdw$RDW_Blom)
+qqnorm(labs_rdw$RDW_Blom)
+qqline(labs_rdw$RDW_Blom)
+```
+
+That definitely looks better, but that rounding might be a problem. Most of the data is confined to these few bins. I'm not sure what ramifications this has for further analysis to be honest. I think it should be fine to use, but might lose statistical power?
+
+Let's start our exploratory analysis by comparing RDW across sex/status.
+
+```{r RDW sex/status summary}
+# Start with summary stats, determine sizes of each group
+print("Number and proportion of Intact Females in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Intact Female"))
+nrow(subset(labs_rdw, sex_status == "Intact Female")) / nrow(labs_rdw)
+
+print("Number and proportion of Intact Males in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Intact Male"))
+nrow(subset(labs_rdw, sex_status == "Intact Male")) / nrow(labs_rdw)
+
+print("Number and proportion of Spayed Females in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Spayed Female"))
+nrow(subset(labs_rdw, sex_status == "Spayed Female")) / nrow(labs_rdw)
+
+print("Number and proportion of Neutered Males in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Neutered Male"))
+nrow(subset(labs_rdw, sex_status == "Neutered Male")) / nrow(labs_rdw)
+
+ggplot(labs_rdw, aes(sex_status, RDW_Blom)) +
+  geom_boxplot()
+```
+
+The sizes of the groups are very unbalanced. However, since the unequal variance assumption isn't violated, I think a one-way ANOVA should be fine.
+
+```{r RDW sex/status ANOVA}
+# Fit one-way ANOVA and report results
+rdw_sex_anova <- aov(RDW_Blom ~ sex_status, labs_rdw)
+summary(rdw_sex_anova)
+
+# Diagnostic plots for our ANOVA, ensuring residuals are normally distributed
+qqnorm(residuals(rdw_sex_anova))
+qqline(residuals(rdw_sex_anova))
+plot(rdw_sex_anova, which = 1)
+
+# Tukey pairwise comparison
+TukeyHSD(rdw_sex_anova)
+
+# Fit one-way ANOVA and report results
+rdw_age_anova <- aov(RDW_Blom ~ RDW_age, labs_rdw)
+summary(rdw_age_anova)
+
+# Diagnostic plots for our ANOVA, ensuring residuals are normally distributed
+qqnorm(residuals(rdw_age_anova))
+qqline(residuals(rdw_age_anova))
+plot(rdw_age_anova, which = 1)
+
+
+```
+
+Interesting. It looks like sex does affect mean RDW, but only Spayed Females and Intact Males had significantly differing means. These observations really aren't independent, though, since each dog will have several RDW measures in the data. I'm not sure what we can conclude from this. The diagnostic plots look fine to me (aside from the rounding... still not sure what the ramifications are to this).
+
+
+## 5/28:
+
+I would like to start looking at the relationship between RDW and age. Let's look at the distribution of age at the time RDW labs were taken.
+
+```{r}
+print("Age at RDW  labs mean, median, range:")
+mean(labs_rdw$RDW_age)
+median(labs_rdw$RDW_age)
+range(labs_rdw$RDW_age)
+hist(labs_rdw$RDW_age)
+qqnorm(labs_rdw$RDW_age)
+qqline(labs_rdw$RDW_age)
+```
+
+This is actually impressively normally distributed. I wasn't expecting age to be normally distributed, but I think this is good enough for most tests. A Shapiro-Wilks test will probably be uninformative given the large sample sizes at play here.
+
+I would like to look at just a simple Pearson's correlation. Let's make a rug plot and look at the distributions.
+
+```{r}
+rdw_age_rug <- ggplot(labs_rdw, aes(x = RDW_age, y = RDW_Blom)) +
+  geom_point() +
+  geom_rug(col = "firebrick", alpha = 0.2)
+rdw_age_rug
+```
+
+That rounding is funky as always, and there are a couple of outliers, but I think it looks close enough to bivariately normal to try a Pearson's correlation.
+
+```{r}
+cor.test(labs_rdw$RDW_age, labs_rdw$RDW_Blom, alternative = "two.sided", method = "pearson")
+
+# With the raw data
+# cor.test(labs_rdw$RDW_age, labs_rdw$RDW, alternative = "two.sided", method = "pearson")
+```
+
+It looks like there's a weak but significant positive correlation between age and RDW. It's hard to see given the extreme rounding of RDW, but this does make sense given the distributions. With age, more samples appear on the higher "stairsteps" of the RDW measures and fewer on the lower ones.
+
+## 5/30:
+
+I suspect that RDW would be more informative as a predictor of percentage of life lived than of overall age. Since there's several years of time between 25% and 75% mortality, I would expect there to be a wide range in when dogs start showing signs of age-related health issues. If RDW increases as these issues start to crop up, then it would make sense that dogs dying younger would have their RDW increase faster.
+
+To investigate this, we'll need to look at only the dogs for which we have a confirmed death date.
+
+```{r}
+# Create a new dataframe with only labs for dogs that aren't censored
+labs_rdw_dead <- labs_rdw[labs_rdw$subject_id %in% demographic[which(demographic$event_type), "subject_id"],]
+
+labs_rdw_dead %<>% merge(select(demographic, subject_id, event_age), by = "subject_id")
+
+labs_rdw_dead$RDW_PLL <- labs_rdw_dead$RDW_age / labs_rdw_dead$event_age
+
+print("PLL at RDW labs mean, median, range:")
+mean(labs_rdw_dead$RDW_PLL)
+median(labs_rdw_dead$RDW_PLL)
+range(labs_rdw_dead$RDW_PLL)
+hist(labs_rdw_dead$RDW_PLL)
+qqnorm(labs_rdw_dead$RDW_PLL)
+qqline(labs_rdw_dead$RDW_PLL)
+```
+
+## 6/5:
+
+That looks a bit weird. Dogs not getting blood panels until they're older makes sense, but there definitely shouldn't be dogs getting blood tests done at 110% of life lived.
+
+```{r}
+labs_rdw_dead[labs_rdw_dead$RDW_PLL > 1,]
+
+demographic[demographic$subject_id == "grlsR2FVJBB",]
+```
+
+So it's just one dog, grlsR2FVJBB. Apparently RDW was done a year he died. I'm assuming this is a data entry error, unless there's some way to perform blood panels on preserved samples long after death (and a reason to actually do that).
+
+Looking at the entries for dog grlsR2FVJBB in clinical_labs.csv, the visit in January 2023 is labelled as a necropsy, and the one in February 2022 is labelled as an annual visit. I think it's safe to assume that the death date was entered incorrectly, and he actually died in January 2023.
+
+Let's correct this for our analysis.
+
+```{r}
+labs_rdw_dead[labs_rdw_dead$subject_id=="grlsR2FVJBB", "event_age"] <- as.yearmon("2023-01") - labs_rdw_dead[labs_rdw_dead$subject_id=="grlsR2FVJBB", "birth_date"]
+
+labs_rdw_dead$RDW_PLL <- labs_rdw_dead$RDW_age / labs_rdw_dead$event_age
+
+print("PLL at RDW labs mean, median, range:")
+mean(labs_rdw_dead$RDW_PLL)
+median(labs_rdw_dead$RDW_PLL)
+range(labs_rdw_dead$RDW_PLL)
+hist(labs_rdw_dead$RDW_PLL)
+qqnorm(labs_rdw_dead$RDW_PLL)
+qqline(labs_rdw_dead$RDW_PLL)
+```
+
+## 6/27
+
+After my first attempt to model the data with a linear regression, my hunch that PLL is better predicted by RDW than age is even stronger. Let's make a rug plot to just check my intuitions that this we'll see a stronger relationship.
+
+```{r}
+rdw_pll_rug <- ggplot(labs_rdw_dead, aes(x = RDW_PLL, y = RDW_Blom)) +
+  geom_point() +
+  geom_rug(col = "firebrick", alpha = 0.2)
+rdw_pll_rug
+
+```
+
+```{r}
+cor.test(labs_rdw_dead$RDW_PLL, labs_rdw_dead$RDW_Blom, alternative = "two.sided", method = "pearson")
+```
+
+07/25/2026
+I want to add mortality analysis as well, so we know when the mortality starts increasing
+
+Note, I ran this analysis with and without binning the event dates to 0.5yrs. It did not make much of a difference, so I kept the analysis with the raw data. 
+```{r}
+
+# 0 Recode Status to numeric (Dead = 1, others = 0)
+nd_data2 <- demographic # make a new data frame to not mess things up
+
+nd_data2 <- nd_data2 %>% mutate (
+                            event_type = event_type %>%
+                              recode_values(
+                                TRUE ~ 1,
+                                FALSE ~ 0
+                              )
+                            )
+
+# nd_data2$event_age <- plyr::round_any(nd_data2$event_age, 0.5) # if you want to bin the data, use this.
+
+# 1 Function: actuarial/demography life table at event times
+make_demography_lifetable <- function(subdf, time_col = "event_age", status_col = "event_type") {
+  # keep only rows with non-missing Death_Day/status
+  subdf <- subdf %>% filter(!is.na(.data[[time_col]]), !is.na(.data[[status_col]])) %>%
+    arrange(.data[[time_col]])
+  
+  # fit KM for this subgroup
+  fit <- survfit(Surv(subdf[[time_col]], subdf[[status_col]]) ~ 1)
+  s <- summary(fit)
+
+  # event times and counts
+  X  <- s$time                      # age/time at each event step
+  nx <- s$n.risk                    # at risk just before the step
+  dx <- s$n.event                   # deaths in the step
+
+  # survivorship (relative to cohort start)
+  l0 <- nx[1]
+  lx <- nx / l0
+
+  # conditional death probability over the step
+  qx <- dx / nx
+
+  # interval widths: from previous event time to current
+  dt <- c(X[1], diff(X))
+  dt[dt <= 0] <- NA_real_  # guard against zero/negative widths
+
+  # force of mortality (piecewise-constant hazard)
+  eps <- 1e-12
+  qx_clamped <- pmin(pmax(qx, eps), 1 - eps)
+  ux <- -log1p(-qx_clamped) / dt
+  ln_ux <- log(ux)
+
+  tibble(
+    X      = X,
+    nx     = nx,
+    dx     = dx,
+    lx     = lx,
+    qx     = qx,
+    ux     = ux,
+    `ln(ux)` = ln_ux)
+}
+
+# 2 Build life tables for each sex
+nd_data2$sex_status <- as.character(nd_data2$sex_status)
+lifetables <- nd_data2 %>%
+  make_demography_lifetable(time_col = "event_age", status_col = "event_type")
+
+
+# 4 Make Gompertz model predictions
+
+# Empty list to store hazard predictions
+gompertz_preds <- list()
+
+ # Fit Gompertz: flexsurvreg expects Surv(time, status)
+    fit <- flexsurv::flexsurvreg(Surv(event_age, event_type) ~ 1, data = nd_data2, dist = "gompertz")
+    
+    # Extract fitted parameters
+    # "shape" = beta, "rate" = eta in flexsurv
+    shape <- fit$res["shape","est"]
+    rate  <- fit$res["rate","est"]
+    
+    # Prediction times
+    times <- seq(6, max(nd_data2$event_age, na.rm = TRUE), by = 0.5)
+
+    
+    # Compute hazard at each time
+    hazard <- flexsurv::hgompertz(times, shape = shape, rate = rate)
+    
+    # Store in a data frame
+    gompertz_preds <- data.frame(
+      X = times,
+      hazard = hazard)
+
+
+
+
+# 5 Age-specific mortality plot 
+    
+mortality <- ggplot(lifetables, aes(x = X, y = ux)) +
+  geom_point(size = 2, alpha = 0.5) +   # semi-transparent points
+  geom_line(
+    data = gompertz_preds,
+    aes(x = X, y = hazard),
+    size = 1.5,                         # thicker lines
+    linetype = "solid") +                   # solid line for visibility
+  # scale_color_manual(values = genotype_colors) +
+  labs(
+    x = "Age (years)",
+    y = "Mortality rate",
+    title = "Age-specific mortality with Gompertz hazard") +
+  ylim(0, 2) +
+  theme_minimal(base_size = 14)
+mortality
+
+# Exporting the file
+pdf(file = "Mortality_RDW_animals.pdf", width = 8, height = 5)
+
+mortality
+
+dev.off()
+
+# Stats to go with this
+coef_table <- fit$coefficients
+vcov_mat <- vcov(fit)
+
+library(tibble)
+library(dplyr)
+
+# Wald test
+pvalues_table <- tibble(
+  term = names(coef_table),
+  estimate = coef_table,
+  se = sqrt(diag(vcov_mat))
+) %>%
+  mutate(
+    z = estimate / se,
+    p_value = 2 * (1 - pnorm(abs(z)))
+  )
+
+
+pvalues_table
+# "Aging rate (shape)", "Baseline hazard (rate)"
+```
+
+I will need to re-run this analysis with all the the animals included using the demographic_all dataset. 
+
+```{r}
+
+rm(nd_data2)
+rm(lifetables, gompertz_preds, fit, shape, rate, times, hazard, mortality, coef_table, vcov_mat, pvalues_table)
+
+# 0 Recode Status to numeric (Dead = 1, others = 0)
+nd_data2 <- demographic_all # make a new data frame to not mess things up
+
+nd_data2 <- nd_data2 %>% mutate (
+                            event_type = event_type %>%
+                              recode_values(
+                                TRUE ~ 1,
+                                FALSE ~ 0
+                              )
+                            )
+
+# nd_data2$event_age <- plyr::round_any(nd_data2$event_age, 0.5) # if you want to bin the data, use this.
+
+# 1 Function: actuarial/demography life table at event times
+make_demography_lifetable <- function(subdf, time_col = "event_age", status_col = "event_type") {
+  # keep only rows with non-missing Death_Day/status
+  subdf <- subdf %>% filter(!is.na(.data[[time_col]]), !is.na(.data[[status_col]])) %>%
+    arrange(.data[[time_col]])
+  
+  # fit KM for this subgroup
+  fit <- survfit(Surv(subdf[[time_col]], subdf[[status_col]]) ~ 1)
+  s <- summary(fit)
+
+  # event times and counts
+  X  <- s$time                      # age/time at each event step
+  nx <- s$n.risk                    # at risk just before the step
+  dx <- s$n.event                   # deaths in the step
+
+  # survivorship (relative to cohort start)
+  l0 <- nx[1]
+  lx <- nx / l0
+
+  # conditional death probability over the step
+  qx <- dx / nx
+
+  # interval widths: from previous event time to current
+  dt <- c(X[1], diff(X))
+  dt[dt <= 0] <- NA_real_  # guard against zero/negative widths
+
+  # force of mortality (piecewise-constant hazard)
+  eps <- 1e-12
+  qx_clamped <- pmin(pmax(qx, eps), 1 - eps)
+  ux <- -log1p(-qx_clamped) / dt
+  ln_ux <- log(ux)
+
+  tibble(
+    X      = X,
+    nx     = nx,
+    dx     = dx,
+    lx     = lx,
+    qx     = qx,
+    ux     = ux,
+    `ln(ux)` = ln_ux)
+}
+
+# 2 Build life tables for each sex
+nd_data2$sex_status <- as.character(nd_data2$sex_status)
+lifetables <- nd_data2 %>%
+  make_demography_lifetable(time_col = "event_age", status_col = "event_type")
+
+
+# 4 Make Gompertz model predictions
+
+# Empty list to store hazard predictions
+gompertz_preds <- list()
+
+ # Fit Gompertz: flexsurvreg expects Surv(time, status)
+    fit <- flexsurv::flexsurvreg(Surv(event_age, event_type) ~ 1, data = nd_data2, dist = "gompertz")
+    
+    # Extract fitted parameters
+    # "shape" = beta, "rate" = eta in flexsurv
+    shape <- fit$res["shape","est"]
+    rate  <- fit$res["rate","est"]
+    
+    # Prediction times
+    times <- seq(0, max(nd_data2$event_age, na.rm = TRUE), by = 0.5)
+
+    
+    # Compute hazard at each time
+    hazard <- flexsurv::hgompertz(times, shape = shape, rate = rate)
+    
+    # Store in a data frame
+    gompertz_preds <- data.frame(
+      X = times,
+      hazard = hazard)
+
+
+
+
+# 5 Age-specific mortality plot 
+    
+mortality <- ggplot(lifetables, aes(x = X, y = ux)) +
+  geom_point(size = 2, alpha = 0.5) +   # semi-transparent points
+  geom_line(
+    data = gompertz_preds,
+    aes(x = X, y = hazard),
+    size = 1.5,                         # thicker lines
+    linetype = "solid") +                   # solid line for visibility
+  # scale_color_manual(values = genotype_colors) +
+  labs(
+    x = "Age (years)",
+    y = "Mortality rate",
+    title = "Age-specific mortality with Gompertz hazard") +
+  ylim(0, 2) +
+  theme_minimal(base_size = 14)
+mortality
+
+# Exporting the file
+pdf(file = "Mortality_all.pdf", width = 4, height = 4)
+
+mortality
+
+dev.off()
+
+# Stats to go with this
+coef_table <- fit$coefficients
+vcov_mat <- vcov(fit)
+
+library(tibble)
+library(dplyr)
+
+# Wald test
+pvalues_table <- tibble(
+  term = names(coef_table),
+  estimate = coef_table,
+  se = sqrt(diag(vcov_mat))
+) %>%
+  mutate(
+    z = estimate / se,
+    p_value = 2 * (1 - pnorm(abs(z)))
+  )
+
+
+pvalues_table
+# "Aging rate (shape)", "Baseline hazard (rate)"
+```
+
+

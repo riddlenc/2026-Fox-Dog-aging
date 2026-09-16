@@ -21,13 +21,12 @@ library(tidyr)
 library(survival)
 library(survminer)
 library(rcompanion)
-library(here)
 ```
 
 ```{r reading data}
-demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
-labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
-physical <- read.csv(here("GRLS_data/exam_physical.csv"))
+demographic <- read.csv("dog_profile.csv")
+labs <- read.csv("clinical_labs.csv")
+physical <- read.csv("exam_physical.csv")
 
 # We are only interested in RDW in the clinical labs (for now at least)
 labs_rdw <- subset(labs, test_name == "RDW")
@@ -108,6 +107,8 @@ qqnorm(labs_rdw$RDW_Blom)
 qqline(labs_rdw$RDW_Blom)
 ```
 
+Ok, I think it's about time we try that linear regression.
+
 ```{r Multiple Regression 1 (RDW on Age and Sex)}
 age_sex_lm <- lm(RDW_Blom ~ RDW_age + sex_status, data = labs_rdw)
 plot(age_sex_lm, ask = FALSE)
@@ -166,39 +167,42 @@ Because we're interested in using RDW as a diagnostic tool, it would be helpful 
 ```{r Predict PLL}
 RDW_sex_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status, random = ~ 1|subject_id, data = labs_rdw_dead)
 summary(RDW_sex_lme)
+performance::model_performance(RDW_sex_lme)
+
+# Rerunning without sex_status as it's not significant
+RDW_lme  <- lme(RDW_PLL ~ RDW_Blom, random = ~ 1|subject_id, data = labs_rdw_dead)
+summary(RDW_lme)
+performance::model_performance(RDW_lme)
 ```
-
-It was suggested that I try fitting a model to only the later part of the data (or a two-part model), based on our exploratory plots. This may also be an application for an additive model.  Let's start with just fitting two different models.
-
-```{r Late Life Model}
-# Let's fit a model for later life, when RDW seems to be on the increase. First we need to define when "late-life" starts.
-
-quantile(labs_rdw_dead$RDW)
-
-mean(subset(labs_rdw_dead, RDW_PLL < 0.7)$RDW)
-mean(subset(labs_rdw_dead, RDW_PLL < 0.8 & RDW_PLL > 0.7)$RDW)
-mean(subset(labs_rdw_dead, RDW_PLL < 0.9 & RDW_PLL > 0.8)$RDW)
-mean(subset(labs_rdw_dead, RDW_PLL > 0.9)$RDW)
-
-mean(subset(labs_rdw_dead, RDW_PLL < 0.95 & RDW_PLL > 0.9)$RDW)
+From the docs: "The marginal R2R2 considers only the variance of the fixed effects (without the random effects), while the conditional R2R2 takes both the fixed and random effects into account (i.e., the total model)."
 
 
-# Looking at the quantiles, it seems like the "high RDW" range can be pretty safely placed somewhere > 13. The jump in mean RDW from <13 to >13 occurs somewhere in the last 10% (or indeed last 5%) of life - this can be seen on the smooth plot as a strong curve upward around 0.9 PLL.
 
-labs_latelife <- subset(labs_rdw_dead, RDW_PLL > 0.9)
-
-latelife_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status, random = ~ 1|subject_id, data = labs_latelife)
-summary(latelife_lme)
-
-```
-
-Additions for plots/statistics from model
-
+Code for smoothed plot in GRLS
 ```{r}
-library(performance)
+rdw_age_smooth <- ggplot(labs_rdw, aes(x = RDW_age, y = RDW)) +
+  geom_smooth()
+rdw_age_smooth
 
-# Calculate Nakagawa's R^2 for our model
-model_performance(RDW_sex_lme)
+rdw_PLL_smooth <- ggplot(labs_rdw_dead, aes(x = RDW_PLL, y = RDW)) +
+  geom_smooth()
+rdw_PLL_smooth
+
+rdw_sex_age_smooth <- ggplot(subset(labs_rdw, sex_status %in% c("Spayed Female", "Neutered Male")), aes(x = RDW_age, y = RDW, color = sex_status)) +
+  geom_smooth()
+rdw_sex_age_smooth
+
+rdw_sex_PLL_smooth <- ggplot(subset(labs_rdw_dead, sex_status %in% c("Spayed Female", "Neutered Male")), aes(x = RDW_PLL, y = RDW, color = sex_status)) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"))
+rdw_sex_PLL_smooth
+
+#rdw_sex_PLL_smooth <- ggplot(labs_rdw_dead, aes(x = RDW_PLL, y = RDW, color = sex_status)) +
+#  geom_smooth()
+#rdw_sex_PLL_smooth
+
+#rdw_sex_age_smooth <- ggplot(labs_rdw, aes(x = RDW_age, y = RDW, color = sex_status)) +
+#  geom_smooth()
+#rdw_sex_age_smooth
 
 ```
 

@@ -22,15 +22,14 @@ library(survival)
 library(survminer)
 library(rcompanion)
 library(nlme)
-library(here)
 ```
 
 Let's start by importing and cleaning the data the same way we have for the other analyses.
 
 ```{r reading data}
-demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
-labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
-physical <- read.csv(here("GRLS_data/exam_physical.csv"))
+demographic <- read.csv("dog_profile.csv")
+labs <- read.csv("clinical_labs.csv")
+physical <- read.csv("exam_physical.csv")
 
 # We are only interested in RDW in the clinical labs (for now at least)
 labs_rdw <- subset(labs, test_name == "RDW")
@@ -163,19 +162,10 @@ summary(PLL_sex_weight_lme)
 ```{r Predicting PLL}
 RDW_sex_weight_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status + weight, random = ~ 1|subject_id, data = rdw_PLL_weight_join)
 summary(RDW_sex_weight_lme)
+performance::model_performance(RDW_sex_weight_lme)
 
 RDW_weight_lme  <- lme(RDW_PLL ~ RDW_Blom + weight, random = ~ 1|subject_id, data = rdw_PLL_weight_join)
 summary(RDW_weight_lme)
+performance::model_performance(RDW_weight_lme)
 ```
 
-Additions for plots/statistics from model
-
-```{r}
-library(performance)
-
-# Calculate Nakagawa's R^2 for our model
-model_performance(RDW_sex_weight_lme)
-
-model_performance(RDW_weight_lme)
-
-```

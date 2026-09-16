@@ -1,0 +1,198 @@
+---
+title: "GRLS Test with another blood metric"
+author: "Abigail Fox"
+date: "2025-05-05"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE)
+```
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(survival)
+library(survminer)
+library(rcompanion)
+```
+
+```{r reading data}
+demographic <- read.csv("dog_profile.csv")
+labs <- read.csv("clinical_labs.csv")
+physical <- read.csv("exam_physical.csv")
+
+labs_wbc <- subset(labs, test_name == "WBC")
+
+physical_weight <- subset(physical, complete.cases(weight))
+
+demographic %<>% subset(subject_id %in% physical_weight$subject_id & subject_id %in% labs_wbc$subject_id)
+
+nrow(demographic)
+```
+
+```{r clean demographic}
+# Event type for censoring. TRUE = death, False = all other outcomes
+demographic$event_type <- demographic$death_date != ""
+
+# Reduce all event dates to a single column
+demographic <- unite(demographic, withdrawn_date, inactive_date, death_date, sep = "") %>% rename(event_date = withdrawn_date)
+
+# If no other event date, include date when data released.
+# This would represent the last follow-up, since the demographic data is released with no embargo.
+demographic$event_date %<>% sub(pattern = "^$", replacement = "2025-01")
+
+# Convert to year-month date type to allow for numeric operations
+demographic$birth_date %<>% as.yearmon()
+demographic$event_date %<>% as.yearmon()
+
+# Determine age at event (in years)
+demographic$event_age <-demographic$event_date - demographic$birth_date
+
+# Clean up, keep only relevant variables
+demographic %<>% select(subject_id, sex_status, birth_date, event_date, event_age, event_type) %>%
+  na.omit()
+```
+
+```{r cleaning weight and WBC}
+# Remove all non-weight variables (and remove any incomplete entries)
+physical_weight %<>% select(subject_id, record_date, weight) %>%
+  rename(weight_date = record_date) %>%
+  subset(weight_date != "") %>%
+  na.omit()
+
+# Convert to year-month date type
+physical_weight$weight_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+physical_weight %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+physical_weight$weight_age <- physical_weight$weight_date - physical_weight$birth_date
+physical_weight$sex_status %<>% as.factor()
+
+physical_weight <- physical_weight[physical_weight$weight < 200,]
+
+# Remove all non-WBC variables (and remove any incomplete entries)
+labs_wbc %<>% select(subject_id, visit_date, test_value) %>%
+  rename(WBC_date = visit_date, WBC = test_value) %>%
+  subset(WBC_date != "")
+labs_wbc$WBC %<>% as.numeric()
+labs_wbc %<>% na.omit()
+
+# Convert to year-month date type
+labs_wbc$WBC_date %<>% as.yearmon()
+
+# Merge with demographic to determine age (in years) at record date
+labs_wbc %<>% merge(select(demographic, subject_id, birth_date, sex_status), by = "subject_id")
+labs_wbc$WBC_age <- labs_wbc$WBC_date - labs_wbc$birth_date
+labs_wbc$sex_status %<>% as.factor()
+
+# Remove extreme WBC (likely data entry error)
+labs_wbc <- labs_wbc[labs_wbc$WBC < 100,]
+```
+
+```{r basic summary}
+print("WBC mean, median, range:")
+mean(labs_wbc$WBC)
+median(labs_wbc$WBC)
+range(labs_wbc$WBC)
+hist(labs_wbc[labs_wbc$WBC < 20,]$WBC)
+qqnorm(labs_wbc$WBC)
+```
+
+```{r}
+labs_wbc$WBC_Blom <- blom(labs_wbc$WBC)
+
+```
+
+```{r}
+wbc_age_smooth <- ggplot(labs_wbc, aes(x = WBC_age, y = WBC)) +
+  geom_smooth()
+wbc_age_smooth
+
+wbc_sex_age_smooth <- ggplot(subset(labs_wbc, sex_status %in% c("Spayed Female", "Neutered Male")), aes(x = WBC_age, y = WBC, color = sex_status)) +
+  geom_smooth()
+wbc_sex_age_smooth
+```
+
+## 4/13
+Let's try and do the same LME as we did for RDW.
+
+```{r Determining PLL}
+# Create a new dataframe with only labs for dogs that aren't censored
+labs_wbc_dead <- labs_wbc[labs_wbc$subject_id %in% demographic[which(demographic$event_type), "subject_id"],]
+
+# Merge with demographic to get age at death
+labs_wbc_dead %<>% merge(select(demographic, subject_id, event_age), by = "subject_id")
+
+# Divide age at wbc by age at death to determine percentage of life lived at wbc
+labs_wbc_dead$WBC_PLL <- labs_wbc_dead$WBC_age / labs_wbc_dead$event_age
+
+print("PLL at WBC labs mean, median, range:")
+mean(labs_wbc_dead$WBC_PLL)
+median(labs_wbc_dead$WBC_PLL)
+range(labs_wbc_dead$WBC_PLL)
+hist(labs_wbc_dead$WBC_PLL)
+qqnorm(labs_wbc_dead$WBC_PLL)
+qqline(labs_wbc_dead$WBC_PLL)
+```
+
+```{r Initial LME}
+library(nlme)
+
+age_sex_lme <- lme(WBC_Blom ~ WBC_age + sex_status, random = ~ 1|subject_id, data = labs_wbc)
+summary(age_sex_lme)
+
+PLL_sex_lme  <- lme(WBC_Blom ~ WBC_PLL + sex_status, random = ~ 1|subject_id, data = labs_wbc_dead)
+summary(PLL_sex_lme)
+```
+
+```{r Predict PLL}
+WBC_sex_lme  <- lme(WBC_PLL ~ WBC_Blom + sex_status, random = ~ 1|subject_id, data = labs_wbc_dead)
+summary(WBC_sex_lme)
+```
+
+## 9/8
+
+We want to determine if it's alright to combine sexes. Let's look at an ANOVA of WBC on sex/status.
+
+```{r WBC sex/status ANOVA}
+# Fit one-way ANOVA and report results
+wbc_sex_anova <- aov(WBC_Blom ~ sex_status, labs_wbc_dead)
+summary(wbc_sex_anova)
+
+# Diagnostic plots for our ANOVA, ensuring residuals are normally distributed
+qqnorm(residuals(wbc_sex_anova))
+qqline(residuals(wbc_sex_anova))
+plot(wbc_sex_anova, which = 1)
+
+# Tukey pairwise comparison
+TukeyHSD(wbc_sex_anova)
+
+ggplot(labs_wbc, aes(x = sex_status, y = WBC_Blom)) + geom_boxplot()
+```
+
+This would seem to suggest that there is a significant difference between neutered males and spayed females, at least in terms of mean WBC. However, I wonder if this is accounted for by any differences in lifespan, age at testing, etc. Let's see if this sex difference has a significant effect on our PLL-corrected LME.
+
+```{r Predict PLL}
+WBC_sex_fixed_lme  <- lme(WBC_PLL ~ WBC_Blom + sex_status, random = ~ 1|subject_id, data = subset(labs_wbc_dead, sex_status %in% c("Spayed Female", "Neutered Male")))
+summary(WBC_sex_fixed_lme)
+```
+
+This result indicates to me that it would be appropriate to combine the sexes when plotting against PLL, so long as we don't include intact animals (as they did have significant differences in the previous LME).
+
+```{r WBC PLL Smooth plot}
+wbc_pll_smooth <- ggplot(labs_wbc_dead, aes(x = WBC_PLL, y = WBC)) +
+  geom_smooth()
+wbc_pll_smooth
+
+
+wbc_sex_pll_smooth <- ggplot(subset(labs_wbc_dead, sex_status %in% c("Spayed Female", "Neutered Male")), aes(x = WBC_PLL, y = WBC, color = sex_status)) +
+  geom_smooth()
+wbc_sex_pll_smooth
+
+```
+
