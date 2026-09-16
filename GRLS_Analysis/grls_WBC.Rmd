@@ -11,6 +11,11 @@ output:
 knitr::opts_chunk$set(echo = TRUE, tidy = TRUE)
 ```
 
+Cleaning Environment
+```{r}
+rm(list=ls())
+```
+
 ```{r loadlib, results='hide', message=F, warning=F}
 library(zoo)
 library(magrittr)
@@ -19,12 +24,13 @@ library(tidyr)
 library(survival)
 library(survminer)
 library(rcompanion)
+library(here)
 ```
 
 ```{r reading data}
-demographic <- read.csv("dog_profile.csv")
-labs <- read.csv("clinical_labs.csv")
-physical <- read.csv("exam_physical.csv")
+demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
+labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
+physical <- read.csv(here("GRLS_data/exam_physical.csv"))
 
 labs_wbc <- subset(labs, test_name == "WBC")
 
@@ -118,7 +124,6 @@ wbc_sex_age_smooth <- ggplot(subset(labs_wbc, sex_status %in% c("Spayed Female",
 wbc_sex_age_smooth
 ```
 
-## 4/13
 Let's try and do the same LME as we did for RDW.
 
 ```{r Determining PLL}
@@ -138,13 +143,17 @@ range(labs_wbc_dead$WBC_PLL)
 hist(labs_wbc_dead$WBC_PLL)
 qqnorm(labs_wbc_dead$WBC_PLL)
 qqline(labs_wbc_dead$WBC_PLL)
+
 ```
 
 ```{r Initial LME}
 library(nlme)
 
-age_sex_lme <- lme(WBC_Blom ~ WBC_age + sex_status, random = ~ 1|subject_id, data = labs_wbc)
+#age_sex_lme <- lme(WBC_Blom ~ WBC_age + sex_status, random = ~ 1|subject_id, data = labs_wbc)
+#the above gave an error
+age_sex_lme <- lme(WBC_Blom ~ WBC_age + sex_status, random = ~ 1|subject_id, data = labs_wbc, control = lmeControl(opt = "optim"))
 summary(age_sex_lme)
+
 
 PLL_sex_lme  <- lme(WBC_Blom ~ WBC_PLL + sex_status, random = ~ 1|subject_id, data = labs_wbc_dead)
 summary(PLL_sex_lme)
@@ -155,7 +164,6 @@ WBC_sex_lme  <- lme(WBC_PLL ~ WBC_Blom + sex_status, random = ~ 1|subject_id, da
 summary(WBC_sex_lme)
 ```
 
-## 9/8
 
 We want to determine if it's alright to combine sexes. Let's look at an ANOVA of WBC on sex/status.
 
@@ -182,7 +190,7 @@ WBC_sex_fixed_lme  <- lme(WBC_PLL ~ WBC_Blom + sex_status, random = ~ 1|subject_
 summary(WBC_sex_fixed_lme)
 ```
 
-This result indicates to me that it would be appropriate to combine the sexes when plotting against PLL, so long as we don't include intact animals (as they did have significant differences in the previous LME).
+This result indicates to me that it would be appropriate to combine the sexes when plotting against PLL, so long as we don't include intact animals and clearly report sex effects on unadjusted age (as they did have significant differences in the previous LME).
 
 ```{r WBC PLL Smooth plot}
 wbc_pll_smooth <- ggplot(labs_wbc_dead, aes(x = WBC_PLL, y = WBC)) +
@@ -194,5 +202,39 @@ wbc_sex_pll_smooth <- ggplot(subset(labs_wbc_dead, sex_status %in% c("Spayed Fem
   geom_smooth()
 wbc_sex_pll_smooth
 
+# Matching colors to our other graphs
+wbc_sex_pll_smooth + scale_colour_manual(values = c("#00BFC4", "#F8766D"))
+
 ```
 
+Use only records included in the RDW analysis
+```{r Subset to records with RDW}
+labs_rdw <- subset(labs, test_name == "RDW")
+labs_rdw %<>% select(subject_id, visit_date, test_value) %>%
+  rename(RDW_date = visit_date, RDW = test_value) %>%
+  subset(RDW_date != "")
+labs_rdw$RDW %<>% as.numeric()
+labs_rdw %<>% na.omit()
+labs_rdw$RDW_date %<>% as.yearmon()
+
+labs_wbc_dead_filtered <- semi_join(labs_wbc_dead, labs_rdw, by = join_by(subject_id, WBC_date == RDW_date))
+```
+
+```{r Create subset plot}
+ggplot(subset(labs_wbc_dead_filtered, sex_status %in% c("Spayed Female", "Neutered Male")), aes(x = WBC_PLL, y = WBC, color = sex_status)) +
+  geom_smooth() +
+  scale_colour_manual(values = c("#00BFC4", "#F8766D"))
+```
+
+
+Additional stats for the manuscript
+
+```{r}
+# Additional statistics for the manuscript
+nrow(labs_wbc_dead)
+length(unique(labs_wbc_dead$subject_id))
+range(labs_wbc_dead$WBC_age)
+range(labs_wbc_dead$WBC)
+labs_wbc_dead %>% count (sex_status)
+
+```
