@@ -22,12 +22,13 @@ library(survival)
 library(survminer)
 library(rcompanion)
 library(performance)
+library(here)
 ```
 
 ```{r reading data}
-demographic <- read.csv("dog_profile.csv")
-labs <- read.csv("clinical_labs.csv")
-physical <- read.csv("exam_physical.csv")
+demographic <- read.csv(here("GRLS_data/dog_profile.csv"))
+labs <- read.csv(here("GRLS_data/clinical_labs.csv"))
+physical <- read.csv(here("GRLS_data/exam_physical.csv"))
 
 # We are only interested in RDW in the clinical labs (for now at least)
 labs_rdw <- subset(labs, test_name == "RDW")
