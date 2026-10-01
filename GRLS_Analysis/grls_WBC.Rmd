@@ -285,6 +285,9 @@ summary(WBC_sex_fixed_lme5)
 WBC_sex_fixed_lme6  <- lme(WBC_PLL ~ WBC_Blom + weight, random = ~ 1|subject_id, data = subset(wbc_PLL_weight_join, sex_status %in% c("Spayed Female", "Neutered Male")))
 summary(WBC_sex_fixed_lme6)
 
+# model performance
+performance::model_performance(WBC_sex_fixed_lme6)
+
 AIC(WBC_sex_fixed_lme4, WBC_sex_fixed_lme5, WBC_sex_fixed_lme6)
 ```
 
