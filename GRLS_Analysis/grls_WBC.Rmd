@@ -254,3 +254,24 @@ labs_wbc_dead_filtered %>% group_by(sex_status) %>% summarize (mean = mean(WBC))
 ``` {r histogram}
 WBC_hist <- hist(labs_wbc_dead_filtered[labs_wbc_dead_filtered$WBC < 20,]$WBC, breaks = 15)
 ```
+
+# Add weight to LME
+
+```{r Weight Join}
+wbc_PLL_weight_join <- inner_join( # Keep only rows with values in both tables
+  labs_wbc_dead_filtered, select(physical_weight, -birth_date, -sex_status),
+  join_by(subject_id, closest(WBC_age >= weight_age)) # Rolling join, carry over last weight measurement
+  ) %>% 
+  subset(WBC_age - weight_age <= 1) # Pipe to subset and remove all weight measures >1 yr old
+
+# Histogram to visualize the distribution of time between wbc and weight measures
+hist(wbc_PLL_weight_join$WBC_age - wbc_PLL_weight_join$weight_age)
+
+hist(wbc_PLL_weight_join$weight)
+```
+
+```{r Predict PLL incl. weight}
+WBC_sex_fixed_lme4  <- lme(WBC_PLL ~ WBC_Blom + sex_status + weight, random = ~ 1|subject_id, data = subset(wbc_PLL_weight_join, sex_status %in% c("Spayed Female", "Neutered Male")))
+summary(WBC_sex_fixed_lme4)
+```
+
