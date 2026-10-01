@@ -145,6 +145,10 @@ qqnorm(labs_wbc_dead$WBC_PLL)
 qqline(labs_wbc_dead$WBC_PLL)
 
 ```
+We have some PLL values that fall outside the expected range of 0-1. We need to remove those data points.
+```{r cleaning PLL]
+labs_wbc_dead <- subset(labs_wbc_dead, WBC_PLL <=1)
+```
 
 ```{r Initial LME}
 library(nlme)
