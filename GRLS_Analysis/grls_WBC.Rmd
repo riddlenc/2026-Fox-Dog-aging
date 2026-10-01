@@ -220,21 +220,37 @@ labs_rdw$RDW_date %<>% as.yearmon()
 labs_wbc_dead_filtered <- semi_join(labs_wbc_dead, labs_rdw, by = join_by(subject_id, WBC_date == RDW_date))
 ```
 
+
+Given the small number of intact animals, here we focus on the spayed/neutered animals.
 ```{r Create subset plot}
 ggplot(subset(labs_wbc_dead_filtered, sex_status %in% c("Spayed Female", "Neutered Male")), aes(x = WBC_PLL, y = WBC, color = sex_status)) +
   geom_smooth() +
   scale_colour_manual(values = c("#00BFC4", "#F8766D"))
 ```
 
+```{r Predict PLL}
+WBC_sex_fixed_lme2  <- lme(WBC_PLL ~ WBC_Blom + sex_status, random = ~ 1|subject_id, data = subset(labs_wbc_dead_filtered, sex_status %in% c("Spayed Female", "Neutered Male")))
+summary(WBC_sex_fixed_lme2)
+
+# Checking the model without sex-status
+WBC_sex_fixed_lme3  <- lme(WBC_PLL ~ WBC_Blom, random = ~ 1|subject_id, data = subset(labs_wbc_dead_filtered, sex_status %in% c("Spayed Female", "Neutered Male")))
+summary(WBC_sex_fixed_lme3)
+```
 
 Additional stats for the manuscript
 
 ```{r}
 # Additional statistics for the manuscript
-nrow(labs_wbc_dead)
-length(unique(labs_wbc_dead$subject_id))
-range(labs_wbc_dead$WBC_age)
-range(labs_wbc_dead$WBC)
-labs_wbc_dead %>% count (sex_status)
+nrow(labs_wbc_dead_filtered)
+length(unique(labs_wbc_dead_filtered$subject_id))
+range(labs_wbc_dead_filtered$WBC_age)
+range(labs_wbc_dead_filtered$WBC)
+labs_wbc_dead_filtered %>% count (sex_status)
+labs_wbc_dead_filtered %>% group_by(sex_status) %>% summarize (mean = mean(WBC))
 
+```
+
+# Making a histogram for the manuscript
+``` {r histogram}
+WBC_hist <- hist(labs_wbc_dead_filtered[labs_wbc_dead_filtered$WBC < 20,]$WBC, breaks = 15)
 ```
