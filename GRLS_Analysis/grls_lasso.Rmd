@@ -188,3 +188,7 @@ plot_predict <- cbind(validation_samples, predict_test)
 ggplot(plot_predict, aes(x = visit_pll, y = predicted_PLL)) + geom_point()
 ```
 
+Looking at the top coefficients in the model
+```{r}
+coef(glm)
+```
