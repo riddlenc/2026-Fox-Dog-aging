@@ -179,3 +179,20 @@ model_performance(RDW_sex_weight_lme)
 model_performance(RDW_weight_lme)
 
 ```
+
+Predict PLL for late life only (where RDW shows sharp increase)
+
+```{r}
+labs_latelife <- subset(rdw_PLL_weight_join, RDW_PLL > 0.9)
+
+latelife_lme  <- lme(RDW_PLL ~ RDW_Blom + weight, random = ~ 1|subject_id, data = labs_latelife)
+latelife_sex_lme  <- lme(RDW_PLL ~ RDW_Blom + sex_status + weight, random = ~ 1|subject_id, data = labs_latelife)
+
+summary(latelife_lme)
+summary(latelife_sex_lme)
+
+model_performance(latelife_lme)
+model_performance(latelife_sex_lme)
+
+```
+
