@@ -1,0 +1,188 @@
+---
+title: "DAP Initial Exploration"
+author: "Abigail Fox"
+date: "2025-09-07"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = TRUE)
+```
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(survival)
+library(survminer)
+library(rcompanion)
+library(here)
+```
+
+In this Rmd, I will do some basic data cleaning and initial exploration on data from the DAP precision cohort. Let's start by just loading the data and seeing what we have to work with.
+
+```{r loadData}
+dog_overview <- read.csv(here("DAP_data/DAP_2023_DogOverview_v1.1.csv"))
+# dog_overview %<>% subset(Cohort == "Precision")
+
+cbc <- read.csv(here("DAP_data/DAP_2023_SamplesResults_CBC_v1.0.csv"))
+
+sample_metadata <- read.csv(here("DAP_data/DAP_2023_SamplesResults_Metadata_v1.0.csv"))
+sample_metadata %<>% subset(Sample_Type == "CBC")
+```
+
+Already, we have a couple problems. As far as I can tell, weight was never actually measured and was only surveyed once. I may be missing something, however. We may still want to incorporate weight into the model just to separate small and large dogs, but we will need a single weight measurement for each dog. Is this inappropriate to use in a LMM? Unsure.
+
+It appears from the DAP publication that blood samples are collected yearly, starting with the year that the demographic data was provided. The samples are only dated according to which year of the study they were collected. This means that age measurements at CBC will only be accurate to the year, and that I will have to convert these reported years into ages. Easy, but slightly annoying.
+
+These samples were also only collected from dogs enrolled in the "Precision" cohort.
+
+Before I mess with the data anymore, let's just get some very simple summary plots of age, sex, and weight.
+
+```{r summaryPlots}
+hist(cbc$krt_cbc_rdw, breaks = 17)
+qqnorm(cbc$krt_cbc_rdw)
+
+# Weight is coded as 5kg bins, represented as string ranges. We can pretty easily just extract the bottom of this range using regex.
+# dog_weight_bin_extracted <- as.numeric(str_extract(dog_overview$Weight_Class_5KGBin_at_HLES, "\\d*"))
+# # Now we can center it by adding 2.5, except in the case where the dog was at the top of the range.
+# for (bin in 1:length(dog_weight_bin_extracted)) {
+#   if (dog_weight_bin_extracted[bin] != 45) {dog_weight_bin_extracted[bin] <- dog_weight_bin_extracted[bin] + 2.5}
+# }
+
+# hist(dog_weight_bin_extracted)
+# qqnorm(dog_weight_bin_extracted)
+```
+
+```{r clean_dog_overview}
+# Convert 5kg weight bins to numeric by taking the lower number in the range, then adding 2.5 to center it.
+
+dog_overview$Weight_Class_5KGBin_extracted_at_HLES <- as.numeric(str_extract(dog_overview$Weight_Class_5KGBin_at_HLES, "\\d*"))
+
+for (bin in 1:length(dog_overview$Weight_Class_5KGBin_extracted_at_HLES)) {
+  if (dog_overview$Weight_Class_5KGBin_extracted_at_HLES[bin] != 45) {dog_overview$Weight_Class_5KGBin_extracted_at_HLES[bin] <- dog_overview$Weight_Class_5KGBin_extracted_at_HLES[bin] + 2.5}
+}
+
+# Clean types and formatting
+dog_overview$Estimated_DOB %<>% as.Date
+dog_overview$is_purebred <- dog_overview$Breed_Status == "Purebred"
+
+# Select and rename columns to keep consistent with GRLS variable names
+# Note we aren't keeping any death data; too few deaths for meaningful sample size
+demographic <- select(dog_overview, dog_id, Sex_Class_at_HLES, Estimated_DOB, Weight_Class_5KGBin_extracted_at_HLES, is_purebred)
+
+demographic %<>% rename(sex_status = Sex_Class_at_HLES, birth_date = Estimated_DOB, weight_bin = Weight_Class_5KGBin_extracted_at_HLES)
+
+```
+
+```{r clean_merge_rdw}
+# We need to clean CBC data and merge with sample metadata
+labs_rdw <- select(cbc, dog_id, DAP_Sample_ID, krt_cbc_rdw)
+
+labs_rdw <- inner_join(labs_rdw, sample_metadata, by = c("DAP_Sample_ID", "dog_id")) %>%
+  left_join(demographic, by = "dog_id") %>%
+  select(dog_id, DAP_Sample_ID, krt_cbc_rdw, Sample_Collection_DateTime, sex_status, birth_date, weight_bin, is_purebred) %>%
+  rename(sample_id = DAP_Sample_ID, RDW = krt_cbc_rdw, RDW_date = Sample_Collection_DateTime)
+
+labs_rdw[labs_rdw$dog_id=="131911","RDW_date"] <- "2023-03-31 12:45:00" # Correct improperly formatted date
+
+labs_rdw$RDW_date %<>% as.Date()
+labs_rdw$RDW_age <- labs_rdw$RDW_date - labs_rdw$birth_date
+labs_rdw$RDW_age %<>% as.numeric()
+```
+
+Let's get some basic plots and perform the same normal scores transformation on RDW as we did for the GRLS data.
+
+```{r basic plots}
+hist(labs_rdw$weight_bin)
+hist(labs_rdw$RDW_age)
+hist(labs_rdw$RDW)
+
+qqnorm(labs_rdw$weight_bin)
+qqline(labs_rdw$weight_bin)
+
+qqnorm(labs_rdw$RDW_age)
+qqline(labs_rdw$RDW_age)
+
+qqnorm(labs_rdw$RDW)
+qqline(labs_rdw$RDW)
+```
+
+```{r transform RDW}
+labs_rdw$RDW_Blom <- blom(labs_rdw$RDW)
+hist(labs_rdw$RDW_Blom)
+qqnorm(labs_rdw$RDW_Blom)
+qqline(labs_rdw$RDW_Blom)
+```
+
+```{r}
+rdw_age_rug <- ggplot(labs_rdw, aes(x = RDW_age, y = RDW_Blom)) +
+  geom_point() +
+  geom_rug(col = "firebrick", alpha = 0.2)
+rdw_age_rug
+
+cor.test(labs_rdw$RDW_age, labs_rdw$RDW_Blom, alternative = "two.sided", method = "pearson")
+```
+
+We want to ask whether sex and status affect RDW. Let's start with summary info.
+
+```{r RDW sex/status summary}
+# Start with summary stats, determine sizes of each group
+print("Number and proportion of Intact Females in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Female, intact"))
+nrow(subset(labs_rdw, sex_status == "Female, intact")) / nrow(labs_rdw)
+
+print("Number and proportion of Intact Males in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Male, intact"))
+nrow(subset(labs_rdw, sex_status == "Male, intact")) / nrow(labs_rdw)
+
+print("Number and proportion of Spayed Females in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Female, spayed"))
+nrow(subset(labs_rdw, sex_status == "Female, spayed")) / nrow(labs_rdw)
+
+print("Number and proportion of Neutered Males in labs_rdw:")
+nrow(subset(labs_rdw, sex_status == "Male, neutered"))
+nrow(subset(labs_rdw, sex_status == "Male, neutered")) / nrow(labs_rdw)
+
+ggplot(labs_rdw, aes(sex_status, RDW_Blom)) +
+  geom_boxplot()
+```
+
+Unequal variance assumption isn't violated, so let's run an ANOVA.
+
+```{r RDW sex/status ANOVA}
+# Fit one-way ANOVA and report results
+rdw_sex_anova <- aov(RDW_Blom ~ sex_status, labs_rdw)
+summary(rdw_sex_anova)
+
+# Diagnostic plots for our ANOVA, ensuring residuals are normally distributed
+qqnorm(residuals(rdw_sex_anova))
+qqline(residuals(rdw_sex_anova))
+plot(rdw_sex_anova, which = 1)
+
+# Tukey pairwise comparison
+TukeyHSD(rdw_sex_anova)
+```
+
+These tukey results are essentially exactly what I expected. Males differ from females, but intact vs. fixed doesn't result in a significant difference. Perhaps a two-way anova on sex and status would be more appropriate but I think this is fine.
+
+What about breed status? Do purebred dogs have significant differences in RDW?
+
+```{r}
+summary(labs_rdw$is_purebred)
+
+ggplot(labs_rdw, aes(is_purebred, RDW_Blom)) +
+  geom_boxplot()
+```
+Similar deal here. Let's do a t-test.
+
+```{r}
+rdw_purebred_t <- t.test(RDW_Blom ~ is_purebred, data = labs_rdw)
+rdw_purebred_t
+```
+
+It appears that purebreds have a higher average RDW. We should probably try incorporating breed status into our model, then.

@@ -1,0 +1,120 @@
+---
+title: "DAP Linear Model"
+author: "Abigail Fox"
+date: "2025-12-01"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loadlib, results='hide', message=F, warning=F}
+library(zoo)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(survival)
+library(survminer)
+library(rcompanion)
+library(here)
+library(nlme)
+```
+
+```{r loadData}
+dog_overview <- read.csv(here("DAP_data/DAP_2023_DogOverview_v1.1.csv"))
+# dog_overview %<>% subset(Cohort == "Precision")
+
+cbc <- read.csv(here("DAP_data/DAP_2023_SamplesResults_CBC_v1.0.csv"))
+
+sample_metadata <- read.csv(here("DAP_data/DAP_2023_SamplesResults_Metadata_v1.0.csv"))
+sample_metadata %<>% subset(Sample_Type == "CBC")
+```
+
+```{r clean_dog_overview}
+# Convert 5kg weight bins to numeric by taking the lower number in the range, then adding 2.5 to center it.
+
+dog_overview$Weight_Class_5KGBin_extracted_at_HLES <- as.numeric(str_extract(dog_overview$Weight_Class_5KGBin_at_HLES, "\\d*"))
+
+for (bin in 1:length(dog_overview$Weight_Class_5KGBin_extracted_at_HLES)) {
+  if (dog_overview$Weight_Class_5KGBin_extracted_at_HLES[bin] != 45) {dog_overview$Weight_Class_5KGBin_extracted_at_HLES[bin] <- dog_overview$Weight_Class_5KGBin_extracted_at_HLES[bin] + 2.5}
+}
+
+# Clean types and formatting
+dog_overview$Estimated_DOB %<>% as.Date
+dog_overview$is_purebred <- dog_overview$Breed_Status == "Purebred"
+
+# Select and rename columns to keep consistent with GRLS variable names
+# Note we aren't keeping any death data; too few deaths for meaningful sample size
+demographic <- select(dog_overview, dog_id, Sex_Class_at_HLES, Estimated_DOB, Weight_Class_5KGBin_extracted_at_HLES, is_purebred)
+
+demographic %<>% rename(sex_status = Sex_Class_at_HLES, birth_date = Estimated_DOB, weight_bin = Weight_Class_5KGBin_extracted_at_HLES)
+
+```
+
+```{r clean_merge_rdw}
+# We need to clean CBC data and merge with sample metadata
+labs_rdw <- select(cbc, dog_id, DAP_Sample_ID, krt_cbc_rdw)
+
+labs_rdw <- inner_join(labs_rdw, sample_metadata, by = c("DAP_Sample_ID", "dog_id")) %>%
+  left_join(demographic, by = "dog_id") %>%
+  select(dog_id, DAP_Sample_ID, krt_cbc_rdw, Sample_Collection_DateTime, sex_status, birth_date, weight_bin, is_purebred) %>%
+  rename(sample_id = DAP_Sample_ID, RDW = krt_cbc_rdw, RDW_date = Sample_Collection_DateTime)
+
+labs_rdw[labs_rdw$dog_id=="131911","RDW_date"] <- "2023-03-31 12:45:00" # Correct improperly formatted date
+
+labs_rdw$RDW_date %<>% as.Date()
+labs_rdw$RDW_age <- labs_rdw$RDW_date - labs_rdw$birth_date
+labs_rdw$RDW_age %<>% as.numeric()
+
+labs_rdw$RDW_Blom <- blom(labs_rdw$RDW)
+```
+
+```{r}
+age_on_four_lme <- lme(RDW_age ~ RDW_Blom + sex_status + weight_bin + is_purebred, random = ~ 1|dog_id, data = labs_rdw)
+summary(age_on_four_lme)
+
+age_on_four_lm <- lm(RDW_age ~ RDW_Blom + sex_status + weight_bin + is_purebred, data = labs_rdw)
+summary(age_on_four_lme)
+
+age_on_two_lme <- lme(RDW_age ~ RDW_Blom + sex_status, random = ~ 1|dog_id, data = labs_rdw)
+summary(age_on_two_lme)
+```
+
+The residual vs fitted plots look  kind of weird to me. Not sure what's up with the diagonal line:
+```{r}
+plot(age_on_four_lme)
+plot(age_on_four_lm)
+plot(age_on_two_lme)
+```
+
+```{r}
+rdw_sex_age_smooth <- ggplot(labs_rdw, aes(x = RDW_age, y = RDW, color = sex_status)) +
+  geom_smooth()
+rdw_sex_age_smooth
+```
+
+## 7/27/2026
+Additions for plots/statistics from model
+
+```{r}
+library(performance)
+
+# Calculate Nakagawa's R^2 for our model
+model_performance(age_on_four_lme)
+
+model_performance(age_on_two_lme)
+
+```
+
+```{r}
+labs_rdw$predict_age <- predict(age_on_two_lme, level = 1)
+
+ggplot(labs_rdw, aes(x = RDW_Blom, y = predict_age, colour=sex_status, group = dog_id)) +
+  geom_line() +
+#  geom_smooth(aes(y=predict_age), method = lm, linetype = "dashed") +
+  scale_color_manual(values = c("Male, intact" = "dodgerblue4", "Male, neutered" = "deepskyblue1", "Female, intact" = "firebrick4", "Female, spayed" = "firebrick1"))
+```
