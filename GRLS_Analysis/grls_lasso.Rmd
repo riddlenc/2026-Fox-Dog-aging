@@ -1,8 +1,10 @@
 ---
 title: "GRLS LASSO"
-author: "Abigail Fox"
+author: "Abigail R. Fox, Nicole C. Riddle"
 date: "2026-09-09"
-output: html_document
+output:
+  pdf_document:
+    latex_engine: xelatex
 ---
 
 ```{r setup, include=FALSE}

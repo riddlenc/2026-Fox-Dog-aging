@@ -1,6 +1,6 @@
 ---
 title: "GRLS Incorporating Weight"
-author: "Abigail Fox"
+author: "Abigail R. Fox, Nicole C. Riddle"
 date: "2025-08-19"
 output:
   pdf_document:

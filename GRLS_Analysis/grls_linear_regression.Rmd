@@ -1,6 +1,6 @@
 ---
 title: "GRLS Age/RDW Regressions"
-author: "Abigail Fox"
+author: "Abigail R. Fox, Nicole C. Riddle"
 date: "2025-06-27"
 output:
   pdf_document:

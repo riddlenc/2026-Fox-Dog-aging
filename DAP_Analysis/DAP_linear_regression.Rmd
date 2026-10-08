@@ -1,6 +1,6 @@
 ---
 title: "DAP Linear Model"
-author: "Abigail Fox"
+author: "Abigail R. Fox, Nicole C. Riddle"
 date: "2025-12-01"
 output:
   pdf_document:

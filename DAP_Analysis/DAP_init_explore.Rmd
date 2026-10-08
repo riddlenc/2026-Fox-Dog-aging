@@ -1,6 +1,6 @@
 ---
 title: "DAP Initial Exploration"
-author: "Abigail Fox"
+author: "Abigail R. Fox, Nicole C. Riddle"
 date: "2025-09-07"
 output:
   pdf_document:

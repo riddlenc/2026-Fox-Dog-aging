@@ -1,6 +1,6 @@
 ---
 title: "GRLS Initial exploration"
-author: "Abigail Fox"
+author: "Abigail R. Fox, Nicole C. Riddle"
 date: "2025-05-05"
 output:
   pdf_document:
