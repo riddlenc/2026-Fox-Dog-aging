@@ -68,7 +68,7 @@ Cases 1 to 3 are effectively right-censors, and the date is either the date list
 After talking with Dr. Riddle, I've decided to look at the cause of death data.
 
 ```{r endpoints}
-endpoints <- read.csv("study_endpoints.csv")
+endpoints <- read.csv(here("GRLS_data/study_endpoints.csv"))
 endpoints %<>% subset(subject_id %in% demographic$subject_id)
 
 nrow(endpoints)
@@ -289,7 +289,7 @@ summary(as.factor(demographic$sex_status)) # Number of animals per group
 
 After thinking about this survival curve some more, we realized that it is rather misleading - we have no deaths before 6 years of age, because our dataset doesn't include any of the animals that might have died prior to 11/202 at younger ages - they had no RDW data. Thus, to really understand what's going on, we need to get a survivorship curve based on all the animals. 
 ```{r}
-demographic_all <- read.csv("dog_profile.csv") #Reading in all the data again.
+demographic_all <- read.csv(here("GRLS_data/dog_profile.csv")) #Reading in all the data again.
 
 # Summary of status
 summary(as.factor(demographic_all$study_status))
