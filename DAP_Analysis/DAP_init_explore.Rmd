@@ -166,6 +166,14 @@ plot(rdw_sex_anova, which = 1)
 
 # Tukey pairwise comparison
 TukeyHSD(rdw_sex_anova)
+
+for (group in unique(labs_rdw$sex_status)) {
+  rdw_of_group <- labs_rdw[labs_rdw$sex_status == group, "RDW"]
+  print(paste0(group, 
+               "s have a mean RDW of ", mean(rdw_of_group),
+               " with a standard error of ", sd(rdw_of_group) / sqrt(length(rdw_of_group))
+               ))
+}
 ```
 
 These tukey results are essentially exactly what I expected. Males differ from females, but intact vs. fixed doesn't result in a significant difference. Perhaps a two-way anova on sex and status would be more appropriate but I think this is fine.
@@ -183,6 +191,14 @@ Similar deal here. Let's do a t-test.
 ```{r}
 rdw_purebred_t <- t.test(RDW_Blom ~ is_purebred, data = labs_rdw)
 rdw_purebred_t
+
+for (group in unique(labs_rdw$is_purebred)) {
+  rdw_of_group <- labs_rdw[labs_rdw$is_purebred == group, "RDW"]
+  print(paste0(group, 
+               "s have a mean RDW of ", mean(rdw_of_group),
+               " with a standard error of ", sd(rdw_of_group) / sqrt(length(rdw_of_group))
+               ))
+}
 ```
 
 It appears that purebreds have a higher average RDW. We should probably try incorporating breed status into our model, then.

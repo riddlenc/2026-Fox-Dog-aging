@@ -252,6 +252,13 @@ range(labs_wbc_dead_filtered$WBC)
 labs_wbc_dead_filtered %>% count (sex_status)
 labs_wbc_dead_filtered %>% group_by(sex_status) %>% summarize (mean = mean(WBC))
 
+for (group in levels(labs_wbc_dead_filtered$sex_status)) {
+  wbc_of_group <- labs_wbc_dead_filtered[labs_wbc_dead_filtered$sex_status == group, "WBC"]
+  print(paste0(group, 
+               "s have a mean WBC of ", mean(wbc_of_group),
+               " with a standard error of ", sd(wbc_of_group) / sqrt(length(wbc_of_group))
+               ))
+}
 ```
 
 # Making a histogram for the manuscript

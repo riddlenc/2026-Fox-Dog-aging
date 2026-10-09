@@ -323,6 +323,8 @@ hist(demographic_all$event_age, breaks = 17)
 qqnorm(demographic_all$event_age)
 
 # Survival plots etc.
+survfit(Surv(event_age, event_type) ~ sex_status, data = demographic_all)
+
 ggsurvplot(survfit(Surv(event_age, event_type) ~ sex_status, data = demographic_all))
 
 surv_pvalue(survfit(Surv(event_age, event_type) ~ sex_status, data = demographic_all))
@@ -409,6 +411,13 @@ qqnorm(residuals(rdw_age_anova))
 qqline(residuals(rdw_age_anova))
 plot(rdw_age_anova, which = 1)
 
+for (group in levels(labs_rdw$sex_status)) {
+  rdw_of_group <- labs_rdw[labs_rdw$sex_status == group, "RDW"]
+  print(paste0(group, 
+               "s have a mean RDW of ", mean(rdw_of_group),
+               " with a standard error of ", sd(rdw_of_group) / sqrt(length(rdw_of_group))
+               ))
+}
 
 ```
 
