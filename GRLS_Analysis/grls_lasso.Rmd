@@ -187,7 +187,10 @@ colnames(predict_test) <- "predicted_PLL"
 cor.test(validation_samples$visit_pll, predict_test)
 
 plot_predict <- cbind(validation_samples, predict_test)
-ggplot(plot_predict, aes(x = visit_pll, y = predicted_PLL)) + geom_point()
+ggplot(plot_predict, aes(x = visit_pll, y = predicted_PLL)) + geom_point() + geom_smooth(method = "lm", se = F) +
+  labs(x = "PLL", y = "Predicted PLL")
+
+glm$dev.ratio # Equivalent to R squared
 ```
 
 Looking at the top coefficients in the model

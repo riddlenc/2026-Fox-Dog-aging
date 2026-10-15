@@ -298,3 +298,18 @@ performance::model_performance(WBC_sex_fixed_lme6)
 AIC(WBC_sex_fixed_lme4, WBC_sex_fixed_lme5, WBC_sex_fixed_lme6)
 ```
 
+```{r Plot WBC effect estimates}
+WBC_effects <- effects::effect(term = "WBC_Blom", mod = WBC_sex_fixed_lme6, quantiles = seq(0,1,by=0.00001))
+WBC_effects_df <- as.data.frame(WBC_effects)
+WBC_effects_df$high_int <- WBC_effects_df$upper + max(random.effects(WBC_sex_fixed_lme6))
+WBC_effects_df$low_int <- WBC_effects_df$lower + min(random.effects(WBC_sex_fixed_lme6))
+
+jitter <- position_jitter(width = 0.0, height = 0, seed = 1009)
+
+ggplot() +
+  geom_ribbon(data = WBC_effects_df, aes(x = WBC_Blom, ymin = low_int, ymax = high_int), alpha = 0.2, fill = "steelblue4") +
+  geom_ribbon(data = WBC_effects_df, aes(x = WBC_Blom, ymin = upper, ymax = lower), alpha = 0.5, fill = "steelblue") +
+  geom_point(data = subset(wbc_PLL_weight_join, WBC_PLL < 1), aes(y = WBC_PLL, x = WBC_Blom), alpha = 0.25, position = jitter) +
+  geom_line(data = WBC_effects_df, aes(x = WBC_Blom, y = fit), color = "steelblue4") +
+  labs(x = "WBC (normal scores transformed)", y = "Proportion of life lived")
+```

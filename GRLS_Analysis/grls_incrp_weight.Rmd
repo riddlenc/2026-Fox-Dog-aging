@@ -196,3 +196,40 @@ model_performance(latelife_sex_lme)
 
 ```
 
+```{r Plot RDW effect estimates}
+rdw_effects <- effects::effect(term = "RDW_Blom", mod = RDW_weight_lme, quantiles = seq(0,1,by=0.00001))
+rdw_effects_df <- as.data.frame(rdw_effects)
+rdw_effects_df$high_int <- rdw_effects_df$upper + max(random.effects(RDW_weight_lme))
+rdw_effects_df$low_int <- rdw_effects_df$lower + min(random.effects(RDW_weight_lme))
+
+jitter <- position_jitter(width = 0.1, height = 0, seed = 1009)
+
+ggplot() +
+  geom_ribbon(data = rdw_effects_df, aes(x = RDW_Blom, ymin = low_int, ymax = high_int), alpha = 0.2, fill = "steelblue4") +
+  geom_ribbon(data = rdw_effects_df, aes(x = RDW_Blom, ymin = upper, ymax = lower), alpha = 0.5, fill = "steelblue") +
+  geom_point(data = rdw_PLL_weight_join, aes(y = RDW_PLL, x = RDW_Blom), alpha = 0.25, position = jitter) +
+  geom_line(data = rdw_effects_df, aes(x = RDW_Blom, y = fit), color = "steelblue4") +
+  labs(x = "RDW (normal scores transformed)", y = "Proportion of life lived")
+```
+
+Graphs for presentation:
+
+```{r}
+rdw_freqs <- sapply(rdw_PLL_weight_join$RDW, function(i) {
+  if (i > 14) {
+    return("Other")
+  }
+  else {
+    return(as.character(round(i)))
+  }
+})
+ggplot() + geom_bar(aes(x = rdw_freqs), fill = "steelblue") + 
+ # scale_x_continuous(breaks = seq(11, 20, by = 1), limits = c(11,18)) +
+  labs(x = "RDW [%]", y = "Frequency")
+```
+
+```{r}
+ggplot() + geom_bar(aes(x =count(rdw_PLL_weight_join, subject_id)$n), fill = "firebrick") +
+  labs(x = "Number of RDW measures per dog", y = "Frequency")
+```
+
