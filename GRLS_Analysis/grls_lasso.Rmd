@@ -130,9 +130,11 @@ labs_cbc %<>% filter(test_name_units %in% metrics_to_use)
 
 labs_cbc %<>% select(-test_name, -test_units, -ref_range_or_cutoff)
 
-labs_cbc_pivot <- pivot_wider(labs_cbc, names_from = test_name_units, values_from = test_value) %>% unnest(cols = metrics_to_use) %>% na.omit()
+labs_cbc_pivot <- pivot_wider(labs_cbc, names_from = test_name_units, values_from = test_value) %>% unnest(cols = metrics_to_use)
 
 labs_cbc_pivot[,metrics_to_use] <- sapply(labs_cbc_pivot[,metrics_to_use], as.numeric) # Convert all metrics to numeric
+labs_cbc_pivot <- labs_cbc_pivot[complete.cases(labs_cbc_pivot),] # Remove NAs introduced by coercion
+
 labs_cbc_pivot[,metrics_to_use] <- sapply(labs_cbc_pivot[,metrics_to_use], blom) # Normal scores transform data before fitting
 labs_cbc_pivot$weight %<>% blom()
 ```
@@ -153,7 +155,7 @@ fitting_x_df <- fitting_samples %>% select(sex_status, weight, metrics_to_use)
 x_matrix <- makeX(
   train = fitting_x_df,
   test = validation_x_df,
-  na.impute = TRUE
+  na.impute = FALSE
 )
 
 cv <- cv.glmnet(
